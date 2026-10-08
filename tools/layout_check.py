@@ -166,19 +166,22 @@ def check(snap):
         m = kinds['map']['frame']
         if abs(m[0] - d[2]) > TOLERANCE or abs(m[1] - work[1]) > TOLERANCE:
             problems.append(f'map {m} not flush right of DOSBox {d}')
+    notes = []
     for w in waw:
         f = w['frame']
         if overlap(f, d):
             problems.append(f'"{w["title"][:40]}" {f} over DOSBox {d}')
         if f[0] < work[0] - TOLERANCE or f[1] < work[1] - TOLERANCE or f[2] > work[2] + TOLERANCE or \
                 f[3] > work[3] + TOLERANCE:
-            problems.append(f'"{w["title"][:40]}" {f} off the screen {work}')
+            # the layout's windows must fit; another window may sit where the settings saved it (as the original)
+            (problems if kind(w['title']) != 'other' else notes).append(f'"{w["title"][:40]}" {f} off the screen {work}')
     layout = [w for w in waw if kind(w['title']) != 'other']
     for i, a in enumerate(layout):
         for b in layout[i + 1:]:
             if overlap(a['frame'], b['frame']):
                 problems.append(f'"{a["title"][:30]}" and "{b["title"][:30]}" overlap')
-    return problems, [f'{"(screen working area)":44s} {work}'] + [f'{w["title"][:44]:44s} {w["frame"]}' for w in [*dos, *waw]]
+    return problems, [f'{"(screen working area)":44s} {work}'] + \
+        [f'{w["title"][:44]:44s} {w["frame"]}' for w in [*dos, *waw]] + [f'note: {n} (saved there?)' for n in notes]
 
 
 def run(name, a, scratch):

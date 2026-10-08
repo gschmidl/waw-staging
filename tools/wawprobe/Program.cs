@@ -103,7 +103,8 @@ static class Program
             var gs = hacker.GetGameState();
             var loc = gs?.Location;
             var chars = hacker.GetCharacters();
-            return $"ready={hacker.GameReady} main={gs?.Main} combat={gs?.InCombat} map={loc?.MapIndex} xy={loc?.PrimaryCoordinates} facing={loc?.Facing} chars=[{(chars == null ? "" : string.Join(", ", chars.Select(c => c.Name)))}] states={gs?.StateString}";
+            var enc = hacker.GetEncounterInfo();
+            return $"ready={hacker.GameReady} main={gs?.Main} combat={gs?.InCombat} encounter={(enc == null ? "none" : "yes")} map={loc?.MapIndex} xy={loc?.PrimaryCoordinates} facing={loc?.Facing} chars=[{(chars == null ? "" : string.Join(", ", chars.Select(c => c.Name)))}] states={gs?.StateString}";
         }
         catch (Exception e) { return "EXCEPTION " + e.GetType().Name + ": " + e.Message; }
     }

@@ -8,6 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="WhereAreWe"><HintPath>../../work/bin/Release/net48/WhereAreWe.exe</HintPath></Reference>
+    <Reference Include="System.Configuration" />
   </ItemGroup>
   <Target Name="CopyWawDeps" AfterTargets="Build">
     <ItemGroup><WawDeps Include="../../work/bin/Release/net48/*.dll" /></ItemGroup>

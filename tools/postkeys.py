@@ -1,8 +1,10 @@
 """Post key presses to the top-level window of a process (Windows), e.g. DOSBox Staging's hotkeys.
 
     python postkeys.py PID KEY [KEY...]      KEY = name or combo like ctrl+f5, alt+enter, a, enter
+A window on a private desktop is looked for on the desktop named by POSTKEYS_DESKTOP (default waw-test).
 """
 import ctypes
+import os
 import sys
 import time
 from ctypes import wintypes
@@ -69,7 +71,7 @@ def post(hwnd, vk, down, alt):
 
 def main():
     pid = int(sys.argv[1])
-    hwnd = find_window(pid)
+    hwnd = find_window(pid, os.environ.get('POSTKEYS_DESKTOP', 'waw-test'))
     if not hwnd:
         raise SystemExit(f'no window for PID {pid}')
     user32.PostMessageW(hwnd, 0x0006, 1, 0)  # WM_ACTIVATE: windows on a private desktop never get focus,

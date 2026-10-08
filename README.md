@@ -30,7 +30,10 @@ map images next to the program.
 - DOSBox Staging lays memory out differently from DOSBox 0.74: World of Xeen's CD marker and map scripts and MM3's
   monster table are searched for where the original used fixed addresses.
 - eXoDOS's versions: The Bard's Tale III's THIEFP.EXE (a second memory map), MM3's MM3.COM loader, MM3 with the
-  MT-32 driver.
+  MT-32 driver; The Bard's Tale I and II, whose stack frames lie at other depths than the state tables expect, so
+  their fights are also found by the tables' return addresses anywhere in the live stack (SS:SP from the API).
+- Smaller fixes: quitting after DOSBox has closed no longer waits out reconnect attempts; the Bard's Tale Training
+  Assistant sizes its columns once the party is listed.
 - The surface map images are found next to the program (also The Bard's Tale's Skara Brae map, which the built-in
   map names with a folder of the map author's machine); with a `WhereAreWe.settings` file next to it the settings
   stay there too (portable), and started that way with a game on the command line (`-g`, as eXoDOS does) it skips

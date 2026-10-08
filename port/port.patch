@@ -323,10 +323,10 @@ index 0000000000000000000000000000000000000000..3ebe0bcac24a8db09d602356ed616aab
 +}
 diff --git a/Staging/DosboxApi.cs b/Staging/DosboxApi.cs
 new file mode 100644
-index 0000000000000000000000000000000000000000..db193b42284aa60ffc605c844f44be48cfa336a2
+index 0000000000000000000000000000000000000000..9b1fc062fc7bc4dbe94248ec0dff94f53e8ba20c
 --- /dev/null
 +++ b/Staging/DosboxApi.cs
-@@ -0,0 +1,733 @@
+@@ -0,0 +1,781 @@
 +// DOSBox Staging HTTP API access for the Where Are We? port.
 +//
 +// Where Are We? originally read and wrote DOSBox's process memory (ReadProcessMemory etc.). This port
@@ -341,6 +341,7 @@ index 0000000000000000000000000000000000000000..db193b42284aa60ffc605c844f44be48
 +using System.Collections.Generic;
 +using System.Globalization;
 +using System.IO;
++using System.Net;
 +using System.Net.Sockets;
 +using System.Text;
 +using System.Text.RegularExpressions;
@@ -514,6 +515,30 @@ index 0000000000000000000000000000000000000000..db193b42284aa60ffc605c844f44be48
 +		return list;
 +	}
 +
++	/// <summary>Connected, or connected now; while nothing answers, at most one attempt per second (caller holds the
++	/// lock). Every read would otherwise try again, and the UI thread reads many times per refresh: with DOSBox gone,
++	/// Where Are We? hung for seconds at a time and quit 6 s late.</summary>
++	private static bool EnsureConnected()
++	{
++		if (s_alive)
++		{
++			return true;
++		}
++		if (Elapsed(s_lastProbe) < AliveMilliseconds)
++		{
++			return false;
++		}
++		return Connect();
++	}
++
++	/// <summary>Windows takes 2 s to refuse a connection to a closed local port (it retries the SYN), while a
++	/// listening one connects at once: a local address gets a short wait.</summary>
++	private static int ConnectWait(int timeoutMs)
++	{
++		bool loopback = s_host == "localhost" || (IPAddress.TryParse(s_host, out IPAddress address) && IPAddress.IsLoopback(address));
++		return loopback ? Math.Min(timeoutMs, 50) : timeoutMs;
++	}
++
 +	/// <summary>Find a DOSBox Staging API (caller holds the lock).</summary>
 +	private static bool Connect()
 +	{
@@ -627,7 +652,7 @@ index 0000000000000000000000000000000000000000..db193b42284aa60ffc605c844f44be48
 +					TcpClient client = new TcpClient(s_host.Contains(":") ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork);
 +					client.NoDelay = true;
 +					IAsyncResult connect = client.BeginConnect(s_host, s_port, null, null);
-+					if (!connect.AsyncWaitHandle.WaitOne(timeoutMs) || !client.Connected)
++					if (!connect.AsyncWaitHandle.WaitOne(ConnectWait(timeoutMs)) || !client.Connected)
 +					{
 +						client.Close();
 +						return null;
@@ -800,7 +825,7 @@ index 0000000000000000000000000000000000000000..db193b42284aa60ffc605c844f44be48
 +	/// <summary>A request on the live connection; marks the server dead when it can't be reached.</summary>
 +	private static Response Request(string method, string path, byte[] body = null, string extraHeaders = null)
 +	{
-+		if (!s_alive && !Connect())
++		if (!EnsureConnected())
 +		{
 +			return null;
 +		}
@@ -862,7 +887,7 @@ index 0000000000000000000000000000000000000000..db193b42284aa60ffc605c844f44be48
 +		}
 +		lock (s_lock)
 +		{
-+			if ((!s_alive && !Connect()) || linear < 0 || linear + count > s_ramSize)
++			if ((!EnsureConnected()) || linear < 0 || linear + count > s_ramSize)
 +			{
 +				return false;
 +			}
@@ -894,7 +919,7 @@ index 0000000000000000000000000000000000000000..db193b42284aa60ffc605c844f44be48
 +		}
 +		lock (s_lock)
 +		{
-+			if ((!s_alive && !Connect()) || linear < 0 || linear + count > s_ramSize)
++			if ((!EnsureConnected()) || linear < 0 || linear + count > s_ramSize)
 +			{
 +				return false;
 +			}
@@ -940,7 +965,7 @@ index 0000000000000000000000000000000000000000..db193b42284aa60ffc605c844f44be48
 +	{
 +		lock (s_lock)
 +		{
-+			if ((!s_alive && !Connect()) || linear < 0 || linear + count > s_ramSize)
++			if ((!EnsureConnected()) || linear < 0 || linear + count > s_ramSize)
 +			{
 +				return false;
 +			}
@@ -967,6 +992,29 @@ index 0000000000000000000000000000000000000000..db193b42284aa60ffc605c844f44be48
 +	{
 +		Match match = Regex.Match(json, "\"" + name + "\"\\s*:\\s*(\\d+)");
 +		return match.Success ? long.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture) : -1L;
++	}
++
++	/// <summary>The emulated CPU's stack pointer as a linear address (SS*16 + SP, real mode), from /api/v1/cpu/state;
++	/// false if it can't be had.</summary>
++	public static bool StackPointer(out long linear)
++	{
++		linear = 0L;
++		lock (s_lock)
++		{
++			Response response = Request("GET", "/api/v1/cpu/state");
++			if (response == null || response.Status != 200)
++			{
++				return false;
++			}
++			long ss = JsonNumber(response.Text, "ss");
++			long esp = JsonNumber(response.Text, "esp");
++			if (ss < 0 || esp < 0)
++			{
++				return false;
++			}
++			linear = ss * 16 + (esp & 0xFFFF);
++			return true;
++		}
 +	}
 +
 +	/// <summary>Name of the program DOS is running (the MCB name of the current PSP), "" if unknown.</summary>
@@ -1705,6 +1753,123 @@ index 824602d648bd5dba67eec83c8bb6b63e49a0b37b..4ee48a31ac761b0c7325156c2f012fc4
  			}
  			catch (ArgumentOutOfRangeException ex)
  			{
+diff --git a/WhereAreWe/BT123TrainingAssistantControl.cs b/WhereAreWe/BT123TrainingAssistantControl.cs
+index 1841b9e32b899d9d5a807cc0d979aa29479309b7..2f3e3b74b8371469d89f21fd29a5205e6f1e64b7 100644
+--- a/WhereAreWe/BT123TrainingAssistantControl.cs
++++ b/WhereAreWe/BT123TrainingAssistantControl.cs
+@@ -10,6 +10,8 @@ public class BT123TrainingAssistantControl : TrainingAssistantControl
+ {
+ 	private byte[] m_bytesPrevious;
+ 
++	private bool m_bColumnsSized;
++
+ 	private int m_iNumTrainedHP;
+ 
+ 	private int m_iNumTrainedSP;
+@@ -252,6 +254,13 @@ public class BT123TrainingAssistantControl : TrainingAssistantControl
+ 			}
+ 		}
+ 		lvParty.EndUpdate();
++		// port: the font scaling sized the columns before the party was listed, to the headers alone, which cut off
++		// names and experience; sized to the content once, when the party first shows
++		if (!m_bColumnsSized && lvParty.Items.Count > 0)
++		{
++			m_bColumnsSized = true;
++			Global.SizeHeadersAndContent(lvParty);
++		}
+ 		m_bytesPrevious = ((array == null) ? info.Party.Bytes : array);
+ 	}
+ 
+diff --git a/WhereAreWe/BT1MemoryHacker.cs b/WhereAreWe/BT1MemoryHacker.cs
+index ad6e0a102ea57876b8c38c404aa557964820551d..714e902b37c3db7af80fa1e77939586fa9b33f3c 100644
+--- a/WhereAreWe/BT1MemoryHacker.cs
++++ b/WhereAreWe/BT1MemoryHacker.cs
+@@ -74,6 +74,27 @@ public class BT1MemoryHacker : BTMemoryHacker
+ 		return stringBuilder.ToString();
+ 	}
+ 
++	// Port: eXoDOS's BT1 keeps its stack frames at other depths than the ones BT1Memory.StackLocations was taken
++	// from (measured 2026-10-08 in a played fight: the combat frames 22 bytes deeper, in another session 8; no
++	// fixed depth fits), so every state read Unknown and the encounter window never opened. When the table finds
++	// nothing, the table's combat return addresses are looked for anywhere in the live part of the stack, the most
++	// specific screen first. In that fight none was live in town afterwards, and 564 of 569 readings had one.
++	private static readonly KeyValuePair<int, MainState>[] LiveCombatStates = new KeyValuePair<int, MainState>[6]
++	{
++		new KeyValuePair<int, MainState>(15997, MainState.CombatConfirmRound),
++		new KeyValuePair<int, MainState>(14722, MainState.PreCombat),
++		new KeyValuePair<int, MainState>(9024, MainState.Treasure),
++		new KeyValuePair<int, MainState>(9156, MainState.Combat),
++		new KeyValuePair<int, MainState>(9252, MainState.Combat),
++		new KeyValuePair<int, MainState>(9005, MainState.CombatOptions)
++	};
++
++	private static readonly KeyValuePair<int, MainState>[] LiveCombatSubStates = new KeyValuePair<int, MainState>[2]
++	{
++		new KeyValuePair<int, MainState>(4451, MainState.CombatSelectSpell),
++		new KeyValuePair<int, MainState>(5288, MainState.CombatSelectBardSong)
++	};
++
+ 	protected override BTGameState GetMainState(byte[] stack, byte[] states = null)
+ 	{
+ 		int num = ReadUInt16(BT1.Memory.StackAddressIndicator);
+@@ -104,6 +125,24 @@ public class BT1MemoryHacker : BTMemoryHacker
+ 				break;
+ 			}
+ 		}
++		if (bTGameState.Main == MainState.Unknown)
++		{
++			bTGameState.Main = LiveStackState(stack, LiveStackDepth(), LiveCombatStates, out int found);
++			if (found >= 0)
++			{
++				num3 = found;
++			}
++			if (bTGameState.Main == MainState.CombatOptions)
++			{
++				// choosing a spell or a song for a combat option
++				MainState sub = LiveStackState(stack, LiveStackDepth(), LiveCombatSubStates, out int subFound);
++				if (sub != MainState.Unknown)
++				{
++					bTGameState.Main = sub;
++					num3 = subFound;
++				}
++			}
++		}
+ 		int num5 = 0;
+ 		switch (bTGameState.Main)
+ 		{
+diff --git a/WhereAreWe/BT2MemoryHacker.cs b/WhereAreWe/BT2MemoryHacker.cs
+index c1d68b10f713ee39af1971e0ecf96946fead2c7b..38e215d2ac71a6d7e9bd4f0c1f3394fe512ca684 100644
+--- a/WhereAreWe/BT2MemoryHacker.cs
++++ b/WhereAreWe/BT2MemoryHacker.cs
+@@ -83,6 +83,17 @@ public class BT2MemoryHacker : BTMemoryHacker
+ 		return stringBuilder.ToString();
+ 	}
+ 
++	// Port: in eXoDOS's BT2 the table above finds the fight-or-run, options and confirm screens, but not the combat
++	// round, whose frames carry other return addresses there (a fight played by the user, 2026-10-08, recorded at
++	// every stack change: 10186 in 31 and 7760 in 40 of the 41 round readings, none in town before or after; the
++	// table's 105,8 never occurred). So the encounter window wasn't updated during rounds. Looked for in the live
++	// part of the stack when the table finds nothing.
++	private static readonly KeyValuePair<int, MainState>[] LiveCombatStates = new KeyValuePair<int, MainState>[2]
++	{
++		new KeyValuePair<int, MainState>(10186, MainState.Combat),
++		new KeyValuePair<int, MainState>(7760, MainState.Combat)
++	};
++
+ 	protected override BTGameState GetMainState(byte[] stack, byte[] states = null)
+ 	{
+ 		BTGameState bTGameState = new BTGameState();
+@@ -123,6 +134,10 @@ public class BT2MemoryHacker : BTMemoryHacker
+ 				}
+ 			}
+ 		}
++		if (bTGameState.Main == MainState.Unknown)
++		{
++			bTGameState.Main = LiveStackState(stack, LiveStackDepth(), LiveCombatStates, out int _);
++		}
+ 		if (bTGameState.Main == MainState.Treasure)
+ 		{
+ 			switch (stack[num - 24])
 diff --git a/WhereAreWe/BT3.cs b/WhereAreWe/BT3.cs
 index 2a1adf10608a858c16de4b8e84f7b17fe4c993a6..7326699723747891604a8252e06d18c3e69294b7 100644
 --- a/WhereAreWe/BT3.cs
@@ -2068,6 +2233,56 @@ index 0000000000000000000000000000000000000000..2eabde6ed0062ea34a1b945deb7328b0
 +
 +	public override int StackOffsetIndex => -200769;
 +}
+diff --git a/WhereAreWe/BTMemoryHacker.cs b/WhereAreWe/BTMemoryHacker.cs
+index e9c1b94cc03deea1efdbcaf524f7bc6ec8f17495..22ac9ea83f51b4adbf29222167d4e68dd67df0a2 100644
+--- a/WhereAreWe/BTMemoryHacker.cs
++++ b/WhereAreWe/BTMemoryHacker.cs
+@@ -154,6 +154,45 @@ public abstract class BTMemoryHacker : MemoryHacker
+ 		return null;
+ 	}
+ 
++	/// <summary>Port: how deep below Memory.Stack the game's stack pointer is (the stack window's live part is
++	/// shallower; deeper bytes are left over from earlier calls), -1 if unknown.</summary>
++	protected int LiveStackDepth()
++	{
++		if (!DosboxApi.StackPointer(out long sp))
++		{
++			return -1;
++		}
++		long depth = (long)FoundBlockOffset - DosboxApi.BlockHeader + Memory.Stack - sp;
++		if (depth <= 0 || depth > Memory.StackSize)
++		{
++			return -1;
++		}
++		return (int)depth;
++	}
++
++	/// <summary>Port: the state whose return address sits anywhere in the live part of the stack window, the first
++	/// of the given (address, state) pairs that does; the stack index of the find goes to iIndex.</summary>
++	protected static MainState LiveStackState(byte[] stack, int liveDepth, KeyValuePair<int, MainState>[] states, out int iIndex)
++	{
++		iIndex = -1;
++		if (stack == null || liveDepth <= 0)
++		{
++			return MainState.Unknown;
++		}
++		foreach (KeyValuePair<int, MainState> state in states)
++		{
++			for (int depth = 2; depth < liveDepth && depth <= stack.Length; depth += 2)
++			{
++				if (BitConverter.ToInt16(stack, stack.Length - depth) == state.Key)
++				{
++					iIndex = stack.Length - depth;
++					return state.Value;
++				}
++			}
++		}
++		return MainState.Unknown;
++	}
++
+ 	public override GameState GetGameState()
+ 	{
+ 		return ReadBT123GameState();
 diff --git a/WhereAreWe/CharacterInfoControl.cs b/WhereAreWe/CharacterInfoControl.cs
 index 36e099f96a6dd829e2871961a43652605e78b165..29a90a27dd040d68eb149c76806f4b34d81b4e7e 100644
 --- a/WhereAreWe/CharacterInfoControl.cs

@@ -27,6 +27,11 @@ Changes from the original:
 - Game memory, the DOSBox window and the running program come from DOSBox
   Staging's API (127.0.0.1, port 8086 or 8080; Options > DOSBox to set another).
 - The Bard's Tale III: also the THIEFP.EXE build (the one eXoDOS runs).
+- The Bard's Tale I and II (eXoDOS's versions): fights are recognised, so the
+  Encounters window follows them (their stack frames lie elsewhere than in
+  the versions the original was made with). The Bard's Tale Training
+  Assistant shows names and experience in full.
+- Quitting after DOSBox has closed is immediate (no waiting for DOSBox).
 - Might and Magic III: the state is read right under eXoDOS's MM3.COM loader;
   the monster list is found with the MT-32 driver loaded too.
 - World of Xeen: the CD version and the map scripts are found under DOSBox

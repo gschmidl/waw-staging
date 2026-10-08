@@ -58,6 +58,9 @@ static class Program
         int delay = int.TryParse(Environment.GetEnvironmentVariable("WAWSHOT_DELAY"), out int d) ? d : 4000;
         var steps = new Queue<string>((Environment.GetEnvironmentVariable("WAWSHOT_STEPS") ?? "").Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries));
         Environment.SetEnvironmentVariable("WAW_DOSBOX_API", Environment.GetEnvironmentVariable("WAWSHOT_API"));
+        // as WhereAreWe's Program.Main: a WhereAreWe.settings next to the harness makes the settings portable
+        PortableSettingsProvider.Configure();
+        PortableSettingsProvider.MoveTempFiles();
 
         var asm = typeof(MainForm).Assembly;
         var st = asm.GetType("WhereAreWe.Properties.Settings");
