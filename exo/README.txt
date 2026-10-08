@@ -32,7 +32,9 @@ Changes from the original:
 - World of Xeen: the CD version and the map scripts are found under DOSBox
   Staging's memory layout.
 - The surface map images of the built-in maps are found next to the program
-  (the original found them only in its current folder).
+  (the original found them only in its current folder), also The Bard's
+  Tale's Skara Brae map, which the built-in map names with a folder of the
+  map author's machine.
 - With a file named WhereAreWe.settings next to the program, the settings and
   the autosave file stay in this folder (an empty file is enough).
 

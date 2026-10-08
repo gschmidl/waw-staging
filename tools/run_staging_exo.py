@@ -1,6 +1,6 @@
 """Start DOSBox Staging visibly the way the "with Where Are We?" launcher option does (game dosbox.conf,
 options.conf, waw_staging.conf, from the eXo folder), after a lead time so the user can stop typing, plus extra
-test configs (capture folder); then move the window to the left monitor. Writes the PID to a file.
+test configs (test_port.conf: API on 18086, not the user's 8086; capture folder); then move the window to the left monitor. Writes the PID to a file.
 
     python run_staging_exo.py EXO GAMEDIR PIDFILE [--delay 30] [--conf EXTRA.conf ...] [--staging FOLDER]
 """
@@ -25,7 +25,7 @@ def main():
     time.sleep(a.delay)
     var = os.path.join(a.exo, 'eXoDOS', '!dos', a.game)
     cmd = [os.path.join(a.exo, a.staging, 'dosbox.exe'), '-conf', os.path.join(var, 'dosbox.conf'),
-           '-conf', r'.\emulators\dosbox\options.conf', '-conf', r'.\emulators\dosbox\waw_staging.conf']
+           '-conf', r'.\emulators\dosbox\options.conf', '-conf', r'.\emulators\dosbox\waw_staging.conf', '-conf', os.path.join(HERE, 'test_port.conf')]
     for c in a.conf:
         cmd += ['-conf', c]
     cmd += ['-noconsole', '-exit']

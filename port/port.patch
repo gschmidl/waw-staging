@@ -2442,6 +2442,45 @@ index 48ebde2ed2a9ec843893565c32676badbb35a81c..8720f7c7ec1e8aaf32257ca236e8a0da
  		return memoryStream.ToArray();
  	}
  
+diff --git a/WhereAreWe/ImageCache.cs b/WhereAreWe/ImageCache.cs
+index 5501a26c818c2096c920be5085c0c481db932bd1..17ebd4e72a618b749eb1e81977d2a2b26aba560c 100644
+--- a/WhereAreWe/ImageCache.cs
++++ b/WhereAreWe/ImageCache.cs
+@@ -127,11 +127,33 @@ public class ImageCache
+ 		m_iCropSize += bmpCrop.Width * bmpCrop.Height;
+ 	}
+ 
++	/// <summary>The image file as named, else in the default directory; null if neither exists. A name with a folder
++	/// that isn't there is also looked for by its file name (Bard's Tale 1's built-in map names its image in a folder of
++	/// the map author's machine). Either kind of slash separates folders, so Windows names work elsewhere too.</summary>
++	public static string Locate(string strFile, string strDefaultDirectory)
++	{
++		if (string.IsNullOrEmpty(strFile) || File.Exists(strFile))
++		{
++			return string.IsNullOrEmpty(strFile) ? null : strFile;
++		}
++		if (!Directory.Exists(strDefaultDirectory))
++		{
++			return null;
++		}
++		string path = Path.Combine(strDefaultDirectory, strFile);
++		if (File.Exists(path))
++		{
++			return path;
++		}
++		path = Path.Combine(strDefaultDirectory, strFile.Substring(strFile.LastIndexOfAny(new char[2] { '\\', '/' }) + 1));
++		return File.Exists(path) ? path : null;
++	}
++
+ 	public Bitmap GetFullImage(string strFile, string strDefaultDirectory = null)
+ 	{
+ 		if (!File.Exists(strFile) && Directory.Exists(strDefaultDirectory))
+ 		{
+-			strFile = Path.Combine(strDefaultDirectory, strFile);
++			strFile = Locate(strFile, strDefaultDirectory) ?? Path.Combine(strDefaultDirectory, strFile);
+ 		}
+ 		if (!m_dictFull.ContainsKey(strFile))
+ 		{
 diff --git a/WhereAreWe/InventoryManipulatorForm.cs b/WhereAreWe/InventoryManipulatorForm.cs
 index 6c347792105b193a27ee75771080b72ef9b26169..c6c3fab6fb60eb7275dd27255b404afa2462fe2e 100644
 --- a/WhereAreWe/InventoryManipulatorForm.cs
@@ -2707,7 +2746,7 @@ index 718206fd99d7205bc9566a5621d9560a95ae38ed..0698c7ee93f6862c294744526cc43790
  		this.chName.Text = "Skill Name";
  		this.chName.Width = 150;
 diff --git a/WhereAreWe/MainForm.cs b/WhereAreWe/MainForm.cs
-index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..cedf6597f131d53ba30bb529f3e43582e3273f82 100644
+index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..54183f5081b342886d2a7ba27af7e4726d5d5273 100644
 --- a/WhereAreWe/MainForm.cs
 +++ b/WhereAreWe/MainForm.cs
 @@ -2342,7 +2342,8 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
@@ -2716,7 +2755,7 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..cedf6597f131d53ba30bb529f3e43582
  			{
 -				flag = true;
 +				// built-in maps: ImageCache also looks next to the program (MapSheet.DefaultDirectory)
-+				flag = !File.Exists(Path.Combine(sheet.DefaultDirectory, sheet.UnvisitedBitmapFile));
++				flag = ImageCache.Locate(sheet.UnvisitedBitmapFile, sheet.DefaultDirectory) == null;
  			}
  			else
  			{

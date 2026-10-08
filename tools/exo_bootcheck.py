@@ -15,7 +15,8 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROBE = os.path.join(HERE, 'wawprobe', 'bin', 'Debug', 'net48', 'wawprobe.exe')
-PORT = 8086
+PORT = 18086                                            # test_port.conf; the launcher option's 8086 is the user's
+TEST_CONF = os.path.join(HERE, 'test_port.conf')
 
 # eXoDOS\!dos folder: (keys for the game's DOS menus, wawprobe game name, known game it must report)
 GAMES = {
@@ -70,7 +71,7 @@ def main():
         pidfile = os.path.join(scratch, f'{folder}.pid')
         cmd = [os.path.join(a.exo, a.staging, 'dosbox.exe'), '-conf', os.path.join(var, 'dosbox.conf'),
                '-conf', '.\\emulators\\dosbox\\options.conf', '-conf', '.\\emulators\\dosbox\\waw_staging.conf',
-               '-noconsole', '-exit']
+               '-conf', TEST_CONF, '-noconsole', '-exit']
         subprocess.run([sys.executable, '-I', os.path.join(HERE, 'start_hidden.py'), '--pidfile', pidfile,
                         '--cwd', a.exo, '--env', 'SDL_WINDOWS_DPI_SCALING=0', '--', *cmd], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, timeout=60)

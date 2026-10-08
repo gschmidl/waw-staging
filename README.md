@@ -31,7 +31,8 @@ map images next to the program.
   monster table are searched for where the original used fixed addresses.
 - eXoDOS's versions: The Bard's Tale III's THIEFP.EXE (a second memory map), MM3's MM3.COM loader, MM3 with the
   MT-32 driver.
-- The surface map images are found next to the program; with a `WhereAreWe.settings` file next to it the settings
+- The surface map images are found next to the program (also The Bard's Tale's Skara Brae map, which the built-in
+  map names with a folder of the map author's machine); with a `WhereAreWe.settings` file next to it the settings
   stay there too (portable).
 - The macOS/Linux build: Windows-only calls answer like a system without them, and a few WinForms layout
   behaviours the windows rely on are reproduced on Majorsilence.Forms.

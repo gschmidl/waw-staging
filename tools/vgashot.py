@@ -1,7 +1,7 @@
 """Render a DOSBox Staging guest's 320x200 256-colour screen (mode 13h, A0000) to a PNG through the API,
 with the standard VGA palette (good enough to read text and menus when the window isn't visible).
 
-    python vgashot.py OUT.png [--port 8086]
+    python vgashot.py OUT.png [--port 18086]
 """
 import argparse
 import http.client
@@ -37,7 +37,7 @@ def png(path, w, h, rgb):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('out')
-    ap.add_argument('--port', type=int, default=8086)
+    ap.add_argument('--port', type=int, default=18086)
     a = ap.parse_args()
     c = http.client.HTTPConnection('127.0.0.1', a.port, timeout=5)
     c.request('GET', f'/api/v1/memory/{0xA0000}/{64000}', headers={'Host': f'127.0.0.1:{a.port}'})

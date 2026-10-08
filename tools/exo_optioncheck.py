@@ -15,7 +15,8 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROBE = os.path.join(HERE, 'wawprobe', 'bin', 'Debug', 'net48', 'wawprobe.exe')
-PORT = 8086
+PORT = 18086                                            # test_port.conf; the launcher option's 8086 is the user's
+TEST_CONF = os.path.join(HERE, 'test_port.conf')
 
 WIZ_PARTY = ['s', 'g', 'a', 'b', 'c', 'd', 'e', 'f', '{enter}', 'l']   # start, tavern, add six, leave
 WIZ_MAZE = ['e', 'm', ('wait', 6), 'l', 'n']                            # edge of town, maze, leave camp, not upstairs
@@ -66,7 +67,7 @@ def main():
         pidfile = os.path.join(os.environ['TEMP'], 'waw_optioncheck.pid')
         cmd = [os.path.join(exo, 'emulators', 'dosbox', 'staging', 'dosbox.exe'), '-conf', os.path.join(var, 'dosbox.conf'),
                '-conf', '.\\emulators\\dosbox\\options.conf', '-conf', '.\\emulators\\dosbox\\waw_staging.conf',
-               '-noconsole', '-exit']
+               '-conf', TEST_CONF, '-noconsole', '-exit']
         subprocess.run([sys.executable, '-I', os.path.join(HERE, 'start_hidden.py'), '--pidfile', pidfile, '--cwd', exo,
                         '--env', 'SDL_WINDOWS_DPI_SCALING=0', '--', *cmd], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, timeout=60)
