@@ -63,6 +63,8 @@ def main():
             ram[off:off + n] = data
             return self.send(200, '{}')
 
+    # no SO_REUSEADDR: on Windows it lets a second server bind a port that is in use, and the old one kept answering
+    ThreadingHTTPServer.allow_reuse_address = False
     ThreadingHTTPServer(('127.0.0.1', a.port), H).serve_forever()
 
 

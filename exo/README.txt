@@ -31,6 +31,11 @@ Changes from the original:
   Encounters window follows them (their stack frames lie elsewhere than in
   the versions the original was made with). The Bard's Tale Training
   Assistant shows names and experience in full.
+- World of Xeen (eXoDOS's CD version): fights are recognised (its combat flag
+  sits one byte from where the original looks).
+- Known limit: Might and Magic III outside the towns doesn't tell a fight from
+  walking (the state reads "unknown"); the Encounters window, the map and the
+  party work there as everywhere.
 - Quitting after DOSBox has closed is immediate (no waiting for DOSBox).
 - Might and Magic III: the state is read right under eXoDOS's MM3.COM loader;
   the monster list is found with the MT-32 driver loaded too.

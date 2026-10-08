@@ -2846,7 +2846,7 @@ index 0c93a96bffa3a051a5e73741a36547e3ef1585f9..d69acbffb633eff8fe36d69c83296c28
  	{
  		byte[] array = new byte[2700];
 diff --git a/WhereAreWe/MM45MemoryHacker.cs b/WhereAreWe/MM45MemoryHacker.cs
-index cdd905b15b313d6b82089d454fe0ee1e84a01455..438717d262c0af15af426c97d580eefed24af8bf 100644
+index cdd905b15b313d6b82089d454fe0ee1e84a01455..bcfad8416b3ef5f876f026c1bdbee26d2069fcaf 100644
 --- a/WhereAreWe/MM45MemoryHacker.cs
 +++ b/WhereAreWe/MM45MemoryHacker.cs
 @@ -164,6 +164,19 @@ public class MM45MemoryHacker : MM345MemoryHacker
@@ -2869,7 +2869,19 @@ index cdd905b15b313d6b82089d454fe0ee1e84a01455..438717d262c0af15af426c97d580eefe
  		return false;
  	}
  
-@@ -1573,7 +1586,80 @@ public class MM45MemoryHacker : MM345MemoryHacker
+@@ -1268,7 +1281,10 @@ public class MM45MemoryHacker : MM345MemoryHacker
+ 				break;
+ 			}
+ 		}
+-		mM45GameState.InCombat = ReadByte(Memory.InCombat) == 1;
++		// port: in eXoDOS's World of Xeen (CD) the flag is the byte before (2026-10-08, three fights played by the
++		// user: 1 there in every one, 0 between; the byte at Memory.InCombat stayed 0), so Where Are We? never saw
++		// a fight; its neighbours (acting caster, script length, monster count) are where the table says
++		mM45GameState.InCombat = ReadByte(Memory.InCombat) == 1 || ReadByte(Memory.InCombat - 1) == 1;
+ 		if (LoadingMap)
+ 		{
+ 			if (Settings.Default.MapLoadingTimeout > 0)
+@@ -1573,7 +1589,80 @@ public class MM45MemoryHacker : MM345MemoryHacker
  		{
  			return ReadOffset(Memory.ScriptsNonSVN1 - m_offsetFoundBlock, ReadUInt16(Memory.ScriptsLength));
  		}
@@ -2951,7 +2963,7 @@ index cdd905b15b313d6b82089d454fe0ee1e84a01455..438717d262c0af15af426c97d580eefe
  	}
  
  	public List<ScriptString> MM45MazeStrings(byte[] bytes)
-@@ -1700,7 +1786,7 @@ public class MM45MemoryHacker : MM345MemoryHacker
+@@ -1700,7 +1789,7 @@ public class MM45MemoryHacker : MM345MemoryHacker
  		{
  			return WriteOffset(Memory.ScriptsNonSVN1 - m_offsetFoundBlock + line.Bytes.Offset + 1, line.Bytes);
  		}
