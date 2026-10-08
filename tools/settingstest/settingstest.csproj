@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="WhereAreWe"><HintPath>../../work/bin/Release/net48/WhereAreWe.exe</HintPath></Reference>
+    <Reference Include="System.Configuration" />
+  </ItemGroup>
+  <Target Name="CopyWawDeps" AfterTargets="Build">
+    <ItemGroup><WawDeps Include="../../work/bin/Release/net48/*.dll" /></ItemGroup>
+    <Copy SourceFiles="@(WawDeps)" DestinationFolder="$(OutDir)" />
+    <Copy SourceFiles="../../work/bin/Release/net48/WhereAreWe.exe.config" DestinationFiles="$(OutDir)settingstest.exe.config" />
+  </Target>
+</Project>

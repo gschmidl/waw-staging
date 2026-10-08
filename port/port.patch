@@ -1,0 +1,4488 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..cd42ee34e873b4ddf17cdeeed2e6c0d4e094c62b
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,2 @@
++bin/
++obj/
+diff --git a/Staging/BiosKeyboard.cs b/Staging/BiosKeyboard.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..3ebe0bcac24a8db09d602356ed616aabbbfe225a
+--- /dev/null
++++ b/Staging/BiosKeyboard.cs
+@@ -0,0 +1,309 @@
++// Keys for DOSBox without a window to post to (macOS, Linux, or Staging's window not found on Windows):
++// WM_KEYDOWN/WM_KEYUP messages that Where Are We? posts to the stand-in DOSBox window are turned into BIOS
++// keystrokes (scan code + ASCII, US layout) appended to the BIOS keyboard buffer through the API. Programs
++// that read the keyboard with INT 16h see them as typed keys; programs with their own INT 9 handler don't.
++
++using System;
++using System.Threading;
++
++namespace WhereAreWe;
++
++public static class BiosKeyboard
++{
++	private const int WM_KEYDOWN = 256;
++
++	private const int WM_KEYUP = 257;
++
++	private const int WM_SYSKEYDOWN = 260;
++
++	private const int WM_SYSKEYUP = 261;
++
++	private const int BufferHead = 0x41A;
++
++	private const int BufferTail = 0x41C;
++
++	private const int BufferStart = 0x1E;
++
++	private const int BufferEnd = 0x3E;
++
++	private static bool s_shift;
++
++	private static bool s_ctrl;
++
++	private static bool s_alt;
++
++	private static readonly object s_lock = new object();
++
++	/// <summary>Handle a key message posted to the stand-in window; true if a keystroke was queued.</summary>
++	public static bool Post(int msg, IntPtr wParam, IntPtr lParam)
++	{
++		int vk = (int)wParam.ToInt64() & 0xFF;
++		bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
++		if (!down && msg != WM_KEYUP && msg != WM_SYSKEYUP)
++		{
++			return false;
++		}
++		lock (s_lock)
++		{
++			switch (vk)
++			{
++			case 16:
++			case 160:
++			case 161:
++				s_shift = down;
++				return true;
++			case 17:
++			case 162:
++			case 163:
++				s_ctrl = down;
++				return true;
++			case 18:
++			case 164:
++			case 165:
++				s_alt = down;
++				return true;
++			}
++			if (!down)
++			{
++				return true;
++			}
++			if (!Translate(vk, s_shift, s_ctrl, s_alt, out int scan, out int ascii))
++			{
++				return false;
++			}
++			return Push(scan, ascii);
++		}
++	}
++
++	/// <summary>Append one keystroke to the BIOS buffer, waiting up to a second while it is full.</summary>
++	public static bool Push(int scan, int ascii)
++	{
++		byte[] pointers = new byte[4];
++		for (int attempt = 0; attempt < 50; attempt++)
++		{
++			if (!DosboxApi.ReadUncached(BufferHead, pointers, 0, 4))
++			{
++				return false;
++			}
++			int head = pointers[0] | (pointers[1] << 8);
++			int tail = pointers[2] | (pointers[3] << 8);
++			if (tail < BufferStart || tail >= BufferEnd || (tail & 1) != 0)
++			{
++				return false;
++			}
++			int next = tail + 2 >= BufferEnd ? BufferStart : tail + 2;
++			if (next != head)
++			{
++				if (!DosboxApi.Write(0x400 + tail, new byte[2]
++				{
++					(byte)ascii,
++					(byte)scan
++				}, 0, 2))
++				{
++					return false;
++				}
++				return DosboxApi.Write(BufferTail, new byte[2]
++				{
++					(byte)next,
++					(byte)(next >> 8)
++				}, 0, 2);
++			}
++			Thread.Sleep(20);
++		}
++		return false;
++	}
++
++	private static readonly int[] LetterScan = new int[26]
++	{
++		0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24,
++		0x25, 0x26, 0x32, 0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14,
++		0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C
++	};
++
++	private const string DigitShifted = ")!@#$%^&*(";
++
++	/// <summary>BIOS scan code and ASCII for a Windows virtual key with the given modifiers (US layout).</summary>
++	public static bool Translate(int vk, bool shift, bool ctrl, bool alt, out int scan, out int ascii)
++	{
++		scan = 0;
++		ascii = 0;
++		if (vk >= 65 && vk <= 90)
++		{
++			int i = vk - 65;
++			scan = LetterScan[i];
++			ascii = alt ? 0 : (ctrl ? (i + 1) : (shift ? (65 + i) : (97 + i)));
++			return true;
++		}
++		if (vk >= 48 && vk <= 57)
++		{
++			int d = vk - 48;
++			scan = d == 0 ? 0x0B : 1 + d;
++			if (alt)
++			{
++				scan = d == 0 ? 0x81 : 0x77 + d;
++				ascii = 0;
++			}
++			else
++			{
++				ascii = shift ? DigitShifted[d] : 48 + d;
++			}
++			return true;
++		}
++		if (vk >= 96 && vk <= 105)
++		{
++			int[] numScan = new int[10] { 0x52, 0x4F, 0x50, 0x51, 0x4B, 0x4C, 0x4D, 0x47, 0x48, 0x49 };
++			scan = numScan[vk - 96];
++			ascii = 48 + vk - 96;
++			return true;
++		}
++		if (vk >= 112 && vk <= 121)
++		{
++			int f = vk - 112;
++			scan = (alt ? 0x68 : (ctrl ? 0x5E : (shift ? 0x54 : 0x3B))) + f;
++			return true;
++		}
++		switch (vk)
++		{
++		case 122:
++			scan = alt ? 0x8B : (ctrl ? 0x89 : (shift ? 0x87 : 0x85));
++			return true;
++		case 123:
++			scan = alt ? 0x8C : (ctrl ? 0x8A : (shift ? 0x88 : 0x86));
++			return true;
++		case 13:
++			scan = 0x1C;
++			ascii = ctrl ? 10 : 13;
++			return true;
++		case 27:
++			scan = 0x01;
++			ascii = 27;
++			return true;
++		case 32:
++			scan = 0x39;
++			ascii = 32;
++			return true;
++		case 9:
++			scan = 0x0F;
++			ascii = shift ? 0 : 9;
++			return true;
++		case 8:
++			scan = 0x0E;
++			ascii = ctrl ? 127 : 8;
++			return true;
++		case 38:
++			scan = ctrl ? 0x8D : 0x48;
++			return true;
++		case 40:
++			scan = ctrl ? 0x91 : 0x50;
++			return true;
++		case 37:
++			scan = ctrl ? 0x73 : 0x4B;
++			return true;
++		case 39:
++			scan = ctrl ? 0x74 : 0x4D;
++			return true;
++		case 36:
++			scan = ctrl ? 0x77 : 0x47;
++			return true;
++		case 35:
++			scan = ctrl ? 0x75 : 0x4F;
++			return true;
++		case 33:
++			scan = ctrl ? 0x84 : 0x49;
++			return true;
++		case 34:
++			scan = ctrl ? 0x76 : 0x51;
++			return true;
++		case 45:
++			scan = 0x52;
++			return true;
++		case 46:
++			scan = 0x53;
++			return true;
++		case 106:
++			scan = 0x37;
++			ascii = 42;
++			return true;
++		case 107:
++			scan = 0x4E;
++			ascii = 43;
++			return true;
++		case 109:
++			scan = 0x4A;
++			ascii = 45;
++			return true;
++		case 110:
++			scan = 0x53;
++			ascii = 46;
++			return true;
++		case 111:
++			scan = 0x35;
++			ascii = 47;
++			return true;
++		}
++		string plain;
++		string shifted;
++		switch (vk)
++		{
++		case 186:
++			scan = 0x27;
++			plain = ";";
++			shifted = ":";
++			break;
++		case 187:
++			scan = 0x0D;
++			plain = "=";
++			shifted = "+";
++			break;
++		case 188:
++			scan = 0x33;
++			plain = ",";
++			shifted = "<";
++			break;
++		case 189:
++			scan = 0x0C;
++			plain = "-";
++			shifted = "_";
++			break;
++		case 190:
++			scan = 0x34;
++			plain = ".";
++			shifted = ">";
++			break;
++		case 191:
++			scan = 0x35;
++			plain = "/";
++			shifted = "?";
++			break;
++		case 192:
++			scan = 0x29;
++			plain = "`";
++			shifted = "~";
++			break;
++		case 219:
++			scan = 0x1A;
++			plain = "[";
++			shifted = "{";
++			break;
++		case 220:
++			scan = 0x2B;
++			plain = "\\";
++			shifted = "|";
++			break;
++		case 221:
++			scan = 0x1B;
++			plain = "]";
++			shifted = "}";
++			break;
++		case 222:
++			scan = 0x28;
++			plain = "'";
++			shifted = "\"";
++			break;
++		default:
++			return false;
++		}
++		ascii = alt ? 0 : (shift ? shifted[0] : plain[0]);
++		return true;
++	}
++}
+diff --git a/Staging/DosboxApi.cs b/Staging/DosboxApi.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..db193b42284aa60ffc605c844f44be48cfa336a2
+--- /dev/null
++++ b/Staging/DosboxApi.cs
+@@ -0,0 +1,733 @@
++// DOSBox Staging HTTP API access for the Where Are We? port.
++//
++// Where Are We? originally read and wrote DOSBox's process memory (ReadProcessMemory etc.). This port
++// talks to DOSBox Staging's built-in web server instead (Staging 0.83+, [webserver] webserver_enabled = on),
++// so it works on every platform and with any DOSBox Staging build that has the API.
++//
++// The rest of the program still sees a "process" with one committed memory region: the region starts
++// BlockHeader bytes before guest linear address 0, exactly like the heap block that holds the emulated
++// RAM in DOSBox 0.74 (the layout Where Are We?'s hard-coded offsets assume).
++
++using System;
++using System.Collections.Generic;
++using System.Globalization;
++using System.IO;
++using System.Net.Sockets;
++using System.Text;
++using System.Text.RegularExpressions;
++using System.Threading;
++
++namespace WhereAreWe;
++
++public static class DosboxApi
++{
++	/// <summary>Virtual address of the emulated-RAM region in the pseudo process.</summary>
++	public const ulong VirtualBase = 0x10000000uL;
++
++	/// <summary>Bytes between the region start and guest linear address 0 (DOSBox 0.74's heap block header).</summary>
++	public const int BlockHeader = 32;
++
++	/// <summary>Pseudo process id and handle for the DOSBox reached through the API.</summary>
++	public const int PseudoPid = 0x57A6;
++
++	public static readonly IntPtr ProcessHandle = new IntPtr(0x57A60);
++
++	/// <summary>Stand-in window handle where the real DOSBox window is unknown (not Windows, or not found).</summary>
++	public static readonly IntPtr PseudoWindow = new IntPtr(0x57A64);
++
++	public static readonly int[] DefaultPorts = { 8086, 8080 };
++
++	private const int PageSize = 0x10000;
++
++	private const int CacheMilliseconds = 50;
++
++	private const int BusyMilliseconds = 1000;
++
++	private const int AliveMilliseconds = 1000;
++
++	private static readonly object s_lock = new object();
++
++	private static readonly Dictionary<long, Page> s_pages = new Dictionary<long, Page>();
++
++	private static TcpClient s_client;
++
++	private static Stream s_stream;
++
++	private static string s_host = "127.0.0.1";
++
++	private static int s_port;
++
++	private static long s_ramSize;
++
++	private static int s_lastContact = int.MinValue;
++
++	private static int s_lastProbe = int.MinValue;
++
++	private static bool s_alive;
++
++	private static string s_version = "";
++
++	private sealed class Page
++	{
++		public byte[] Data;
++
++		public int Tick;
++	}
++
++	private sealed class Response
++	{
++		public int Status;
++
++		public byte[] Body;
++
++		public string Text => Encoding.UTF8.GetString(Body);
++	}
++
++	/// <summary>"host:port" to use, or null/empty to probe 127.0.0.1 on the default ports.
++	/// The WAW_DOSBOX_API environment variable overrides it.</summary>
++	public static string Address
++	{
++		get
++		{
++			return s_address;
++		}
++		set
++		{
++			lock (s_lock)
++			{
++				if (value != s_address)
++				{
++					s_address = value;
++					Close();
++					s_alive = false;
++					s_lastProbe = int.MinValue;
++					s_pages.Clear();
++				}
++			}
++		}
++	}
++
++	private static string s_address;
++
++	public static string Version => s_version;
++
++	public static int Port => s_port;
++
++	public static long RamSize => s_ramSize;
++
++	public static ulong RegionSize => (ulong)(BlockHeader + s_ramSize);
++
++	public static string LastError { get; private set; } = "";
++
++	/// <summary>True while a DOSBox Staging API answers; probes again at most once per second.</summary>
++	public static bool IsAlive
++	{
++		get
++		{
++			lock (s_lock)
++			{
++				if (s_alive && Elapsed(s_lastContact) < AliveMilliseconds)
++				{
++					return true;
++				}
++				if (!s_alive && Elapsed(s_lastProbe) < AliveMilliseconds)
++				{
++					return false;
++				}
++				return Connect();
++			}
++		}
++	}
++
++	private static int Elapsed(int tick)
++	{
++		return tick == int.MinValue ? int.MaxValue : unchecked(Environment.TickCount - tick);
++	}
++
++	private static List<KeyValuePair<string, int>> Candidates()
++	{
++		List<KeyValuePair<string, int>> list = new List<KeyValuePair<string, int>>();
++		string text = Environment.GetEnvironmentVariable("WAW_DOSBOX_API");
++		if (string.IsNullOrWhiteSpace(text))
++		{
++			text = Address;
++		}
++		if (!string.IsNullOrWhiteSpace(text))
++		{
++			text = text.Trim();
++			Match match = Regex.Match(text, "^(?:https?://)?(\\[[^\\]]+\\]|[^:/]+)?(?::(\\d+))?/?$");
++			if (match.Success)
++			{
++				string host = match.Groups[1].Success && match.Groups[1].Value != "" ? match.Groups[1].Value.Trim('[', ']') : "127.0.0.1";
++				if (match.Groups[2].Success)
++				{
++					list.Add(new KeyValuePair<string, int>(host, int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture)));
++					return list;
++				}
++				foreach (int port in DefaultPorts)
++				{
++					list.Add(new KeyValuePair<string, int>(host, port));
++				}
++				return list;
++			}
++		}
++		if (s_port != 0)
++		{
++			list.Add(new KeyValuePair<string, int>(s_host, s_port));
++		}
++		foreach (int port in DefaultPorts)
++		{
++			if (port != s_port || s_host != "127.0.0.1")
++			{
++				list.Add(new KeyValuePair<string, int>("127.0.0.1", port));
++			}
++		}
++		return list;
++	}
++
++	/// <summary>Find a DOSBox Staging API (caller holds the lock).</summary>
++	private static bool Connect()
++	{
++		s_lastProbe = Environment.TickCount;
++		foreach (KeyValuePair<string, int> candidate in Candidates())
++		{
++			Close();
++			s_host = candidate.Key;
++			s_port = candidate.Value;
++			Response response = Send("GET", "/api/v1/dosbox/info", null, 300);
++			if (response == null || response.Status != 200)
++			{
++				continue;
++			}
++			Match match = Regex.Match(response.Text, "\"version\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
++			if (!match.Success)
++			{
++				continue;
++			}
++			string version = match.Groups[1].Value;
++			long ramSize = ProbeRamSize();
++			if (ramSize <= 0)
++			{
++				continue;
++			}
++			if (version != s_version || ramSize != s_ramSize)
++			{
++				s_pages.Clear();
++			}
++			s_version = version;
++			s_ramSize = ramSize;
++			s_alive = true;
++			s_lastContact = Environment.TickCount;
++			Global.Log("DOSBox API: {0} at {1}:{2}, {3} bytes of RAM", version, s_host, s_port, ramSize);
++			return true;
++		}
++		Close();
++		if (s_alive)
++		{
++			Global.LogWarning("DOSBox API: connection lost");
++		}
++		s_alive = false;
++		s_pages.Clear();
++		return false;
++	}
++
++	/// <summary>Emulated RAM size: Staging refuses reads past the end and names the size in the error.</summary>
++	private static long ProbeRamSize()
++	{
++		Response response = Send("GET", "/api/v1/memory/" + 0x7FFFFFFF + "/1", null, 1000);
++		if (response == null)
++		{
++			return -1L;
++		}
++		Match match = Regex.Match(response.Text, "memory size \\((\\d+) bytes\\)");
++		if (match.Success)
++		{
++			return long.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
++		}
++		long low = 0x100000L;
++		long high = 0x7FFFFFFFL;
++		if (!ReadsAt(low - 1))
++		{
++			return -1L;
++		}
++		while (high - low > 1)
++		{
++			long mid = (low + high) / 2;
++			if (ReadsAt(mid - 1))
++			{
++				low = mid;
++			}
++			else
++			{
++				high = mid;
++			}
++		}
++		return low;
++	}
++
++	private static bool ReadsAt(long address)
++	{
++		Response response = Send("GET", "/api/v1/memory/" + address + "/1", null, 1000);
++		return response != null && response.Status == 200 && response.Body.Length == 1;
++	}
++
++	private static void Close()
++	{
++		try
++		{
++			s_stream?.Dispose();
++			s_client?.Close();
++		}
++		catch (Exception)
++		{
++		}
++		s_stream = null;
++		s_client = null;
++	}
++
++	/// <summary>One HTTP/1.1 exchange on the kept-alive connection; null if the server can't be reached.</summary>
++	private static Response Send(string method, string path, byte[] body, int timeoutMs, string extraHeaders = null)
++	{
++		for (int attempt = 0; attempt < 2; attempt++)
++		{
++			bool fresh = s_client == null;
++			try
++			{
++				if (s_client == null)
++				{
++					TcpClient client = new TcpClient(s_host.Contains(":") ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork);
++					client.NoDelay = true;
++					IAsyncResult connect = client.BeginConnect(s_host, s_port, null, null);
++					if (!connect.AsyncWaitHandle.WaitOne(timeoutMs) || !client.Connected)
++					{
++						client.Close();
++						return null;
++					}
++					client.EndConnect(connect);
++					s_client = client;
++					s_stream = client.GetStream();
++				}
++				s_client.ReceiveTimeout = timeoutMs;
++				s_client.SendTimeout = timeoutMs;
++				string hostHeader = (s_host.Contains(":") ? "[" + s_host + "]" : s_host) + ":" + s_port;
++				StringBuilder request = new StringBuilder();
++				request.Append(method).Append(' ').Append(path).Append(" HTTP/1.1\r\n");
++				request.Append("Host: ").Append(hostHeader).Append("\r\n");
++				request.Append("Connection: keep-alive\r\n");
++				if (body != null)
++				{
++					request.Append("Content-Type: application/octet-stream\r\n");
++					request.Append("Content-Length: ").Append(body.Length).Append("\r\n");
++				}
++				if (extraHeaders != null)
++				{
++					request.Append(extraHeaders);
++				}
++				request.Append("\r\n");
++				byte[] head = Encoding.ASCII.GetBytes(request.ToString());
++				if (body != null && body.Length + head.Length <= 65536)
++				{
++					byte[] all = new byte[head.Length + body.Length];
++					Buffer.BlockCopy(head, 0, all, 0, head.Length);
++					Buffer.BlockCopy(body, 0, all, head.Length, body.Length);
++					s_stream.Write(all, 0, all.Length);
++				}
++				else
++				{
++					s_stream.Write(head, 0, head.Length);
++					if (body != null)
++					{
++						s_stream.Write(body, 0, body.Length);
++					}
++				}
++				s_stream.Flush();
++				return ReadResponse(method == "HEAD");
++			}
++			catch (Exception ex) when (ex is IOException || ex is SocketException || ex is ObjectDisposedException || ex is InvalidOperationException)
++			{
++				Close();
++				if (fresh)
++				{
++					return null;
++				}
++			}
++		}
++		return null;
++	}
++
++	private static Response ReadResponse(bool headOnly)
++	{
++		string statusLine = ReadLine();
++		Match status = Regex.Match(statusLine, "^HTTP/1\\.[01] (\\d{3})");
++		if (!status.Success)
++		{
++			throw new IOException("bad status line: " + statusLine);
++		}
++		int contentLength = -1;
++		bool chunked = false;
++		bool close = statusLine.StartsWith("HTTP/1.0", StringComparison.Ordinal);
++		string line;
++		while ((line = ReadLine()).Length > 0)
++		{
++			int colon = line.IndexOf(':');
++			if (colon <= 0)
++			{
++				continue;
++			}
++			string name = line.Substring(0, colon).Trim().ToLowerInvariant();
++			string value = line.Substring(colon + 1).Trim();
++			if (name == "content-length")
++			{
++				contentLength = int.Parse(value, CultureInfo.InvariantCulture);
++			}
++			else if (name == "transfer-encoding" && value.ToLowerInvariant().Contains("chunked"))
++			{
++				chunked = true;
++			}
++			else if (name == "connection" && value.ToLowerInvariant().Contains("close"))
++			{
++				close = true;
++			}
++		}
++		MemoryStream bodyStream = new MemoryStream();
++		if (!headOnly)
++		{
++			if (chunked)
++			{
++				while (true)
++				{
++					string sizeLine = ReadLine();
++					int semicolon = sizeLine.IndexOf(';');
++					int size = int.Parse(semicolon >= 0 ? sizeLine.Substring(0, semicolon) : sizeLine, NumberStyles.HexNumber, CultureInfo.InvariantCulture);
++					if (size == 0)
++					{
++						while (ReadLine().Length > 0)
++						{
++						}
++						break;
++					}
++					ReadExactly(bodyStream, size);
++					ReadLine();
++				}
++			}
++			else if (contentLength >= 0)
++			{
++				ReadExactly(bodyStream, contentLength);
++			}
++			else
++			{
++				s_stream.CopyTo(bodyStream);
++				close = true;
++			}
++		}
++		if (close)
++		{
++			Close();
++		}
++		return new Response
++		{
++			Status = int.Parse(status.Groups[1].Value, CultureInfo.InvariantCulture),
++			Body = bodyStream.ToArray()
++		};
++	}
++
++	private static string ReadLine()
++	{
++		StringBuilder line = new StringBuilder();
++		while (true)
++		{
++			int b = s_stream.ReadByte();
++			if (b < 0)
++			{
++				throw new IOException("connection closed");
++			}
++			if (b == '\n')
++			{
++				break;
++			}
++			if (b != '\r')
++			{
++				line.Append((char)b);
++			}
++		}
++		return line.ToString();
++	}
++
++	private static void ReadExactly(MemoryStream target, int count)
++	{
++		byte[] buffer = new byte[Math.Min(count, 65536)];
++		while (count > 0)
++		{
++			int read = s_stream.Read(buffer, 0, Math.Min(buffer.Length, count));
++			if (read <= 0)
++			{
++				throw new IOException("connection closed");
++			}
++			target.Write(buffer, 0, read);
++			count -= read;
++		}
++	}
++
++	/// <summary>A request on the live connection; marks the server dead when it can't be reached.</summary>
++	private static Response Request(string method, string path, byte[] body = null, string extraHeaders = null)
++	{
++		if (!s_alive && !Connect())
++		{
++			return null;
++		}
++		Response response = Send(method, path, body, 2000, extraHeaders);
++		if (response == null)
++		{
++			s_alive = false;
++			s_lastProbe = Environment.TickCount;
++			s_pages.Clear();
++			Global.LogWarning("DOSBox API: request failed, connection lost");
++			return null;
++		}
++		s_lastContact = Environment.TickCount;
++		return response;
++	}
++
++	private static bool IsBusy(Response response)
++	{
++		return response != null && response.Status >= 500 && response.Text.IndexOf("timeout", StringComparison.OrdinalIgnoreCase) >= 0;
++	}
++
++	/// <summary>Fetch one cache page; while DOSBox is busy (e.g. its window is being dragged) an older copy is served.</summary>
++	private static Page GetPage(long pageStart)
++	{
++		s_pages.TryGetValue(pageStart, out Page page);
++		if (page != null && Elapsed(page.Tick) < CacheMilliseconds)
++		{
++			return page;
++		}
++		int length = (int)Math.Min(PageSize, s_ramSize - pageStart);
++		if (length <= 0)
++		{
++			return null;
++		}
++		Response response = Request("GET", "/api/v1/memory/" + pageStart + "/" + length);
++		if (response != null && response.Status == 200 && response.Body.Length == length)
++		{
++			page = new Page { Data = response.Body, Tick = Environment.TickCount };
++			s_pages[pageStart] = page;
++			return page;
++		}
++		if (IsBusy(response) && page != null && Elapsed(page.Tick) < BusyMilliseconds)
++		{
++			return page;
++		}
++		if (response != null && response.Status != 200)
++		{
++			LastError = response.Text;
++		}
++		return null;
++	}
++
++	/// <summary>Read guest RAM at a linear address; false (nothing copied) if any part is unavailable.</summary>
++	public static bool Read(long linear, byte[] buffer, int offset, int count)
++	{
++		if (count == 0)
++		{
++			return true;
++		}
++		lock (s_lock)
++		{
++			if ((!s_alive && !Connect()) || linear < 0 || linear + count > s_ramSize)
++			{
++				return false;
++			}
++			int done = 0;
++			while (done < count)
++			{
++				long address = linear + done;
++				long pageStart = address - address % PageSize;
++				Page page = GetPage(pageStart);
++				if (page == null)
++				{
++					return false;
++				}
++				int inPage = (int)(address - pageStart);
++				int n = Math.Min(count - done, page.Data.Length - inPage);
++				Buffer.BlockCopy(page.Data, inPage, buffer, offset + done, n);
++				done += n;
++			}
++			return true;
++		}
++	}
++
++	/// <summary>Write guest RAM at a linear address; the cache sees the new bytes at once.</summary>
++	public static bool Write(long linear, byte[] buffer, int offset, int count)
++	{
++		if (count == 0)
++		{
++			return true;
++		}
++		lock (s_lock)
++		{
++			if ((!s_alive && !Connect()) || linear < 0 || linear + count > s_ramSize)
++			{
++				return false;
++			}
++			byte[] body = buffer;
++			if (offset != 0 || count != buffer.Length)
++			{
++				body = new byte[count];
++				Buffer.BlockCopy(buffer, offset, body, 0, count);
++			}
++			Response response = null;
++			for (int attempt = 0; attempt < 8; attempt++)
++			{
++				response = Request("PUT", "/api/v1/memory/" + linear, body);
++				if (!IsBusy(response))
++				{
++					break;
++				}
++				Thread.Sleep(50);
++			}
++			if (response == null || response.Status / 100 != 2)
++			{
++				if (response != null)
++				{
++					LastError = response.Text;
++				}
++				return false;
++			}
++			for (long pageStart = linear - linear % PageSize; pageStart < linear + count; pageStart += PageSize)
++			{
++				if (s_pages.TryGetValue(pageStart, out Page page))
++				{
++					long from = Math.Max(linear, pageStart);
++					long to = Math.Min(linear + count, pageStart + page.Data.Length);
++					Buffer.BlockCopy(body, (int)(from - linear), page.Data, (int)(from - pageStart), (int)(to - from));
++				}
++			}
++			return true;
++		}
++	}
++
++	/// <summary>Read guest RAM bypassing the cache (for values the emulated program changes all the time).</summary>
++	public static bool ReadUncached(long linear, byte[] buffer, int offset, int count)
++	{
++		lock (s_lock)
++		{
++			if ((!s_alive && !Connect()) || linear < 0 || linear + count > s_ramSize)
++			{
++				return false;
++			}
++			Response response = Request("GET", "/api/v1/memory/" + linear + "/" + count);
++			if (response == null || response.Status != 200 || response.Body.Length != count)
++			{
++				return false;
++			}
++			Buffer.BlockCopy(response.Body, 0, buffer, offset, count);
++			return true;
++		}
++	}
++
++	/// <summary>Forget cached memory, e.g. before a scan that must see fresh bytes.</summary>
++	public static void Invalidate()
++	{
++		lock (s_lock)
++		{
++			s_pages.Clear();
++		}
++	}
++
++	private static long JsonNumber(string json, string name)
++	{
++		Match match = Regex.Match(json, "\"" + name + "\"\\s*:\\s*(\\d+)");
++		return match.Success ? long.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture) : -1L;
++	}
++
++	/// <summary>Name of the program DOS is running (the MCB name of the current PSP), "" if unknown.</summary>
++	public static string RunningProgram()
++	{
++		lock (s_lock)
++		{
++			Response response = Request("GET", "/api/v1/dos/internals");
++			if (response == null || response.Status != 200)
++			{
++				return "";
++			}
++			long sda = JsonNumber(response.Text, "dosSwappableArea");
++			byte[] psp = new byte[2];
++			if (sda < 0 || !Read(sda + 0x10, psp, 0, 2))
++			{
++				return "";
++			}
++			int segment = psp[0] | (psp[1] << 8);
++			byte[] name = new byte[8];
++			if (segment == 0 || !Read((long)(segment - 1) * 16 + 8, name, 0, 8))
++			{
++				return "";
++			}
++			StringBuilder text = new StringBuilder();
++			foreach (byte b in name)
++			{
++				if (b == 0)
++				{
++					break;
++				}
++				text.Append(b >= 32 && b < 127 ? (char)b : '?');
++			}
++			return text.ToString();
++		}
++	}
++
++	/// <summary>Full path of the program that started the one whose PSP is at the given linear address
++	/// (the parent PSP's environment block names it), "" if unknown.</summary>
++	public static string ParentProgram(long pspLinear)
++	{
++		lock (s_lock)
++		{
++			byte[] word = new byte[2];
++			if (!Read(pspLinear + 0x16, word, 0, 2))
++			{
++				return "";
++			}
++			int parent = word[0] | (word[1] << 8);
++			if (parent == 0 || !Read((long)parent * 16 + 0x2C, word, 0, 2))
++			{
++				return "";
++			}
++			return EnvironmentProgram(word[0] | (word[1] << 8));
++		}
++	}
++
++	/// <summary>The program path stored after the variables of a DOS environment block.</summary>
++	public static string EnvironmentProgram(int envSegment)
++	{
++		byte[] env = new byte[1024];
++		if (envSegment == 0 || !Read((long)envSegment * 16, env, 0, env.Length))
++		{
++			return "";
++		}
++		for (int i = 0; i + 3 < env.Length; i++)
++		{
++			if (env[i] == 0 && env[i + 1] == 0)
++			{
++				StringBuilder path = new StringBuilder();
++				for (int j = i + 4; j < env.Length && env[j] != 0; j++)
++				{
++					path.Append((char)env[j]);
++				}
++				return path.ToString();
++			}
++		}
++		return "";
++	}
++
++	/// <summary>A DOSBox 0.74-style title naming the running program, which the per-game title patterns match.</summary>
++	public static string WindowTitle
++	{
++		get
++		{
++			if (!IsAlive)
++			{
++				return "";
++			}
++			return "DOSBox 0.74, Cpu speed:     3000 cycles, Frameskip  0, Program: " + RunningProgram().PadLeft(8);
++		}
++	}
++}
+diff --git a/Staging/DosboxProcess.cs b/Staging/DosboxProcess.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1baca8549726b148c0165a11466ea6d82522ef53
+--- /dev/null
++++ b/Staging/DosboxProcess.cs
+@@ -0,0 +1,38 @@
++// Stand-in for the System.Diagnostics.Process of a DOSBox that Where Are We? used to open: the DOSBox
++// Staging instance reachable through its HTTP API (see DosboxApi).
++
++using System;
++
++namespace WhereAreWe;
++
++public sealed class DosboxProcess
++{
++	private static readonly DosboxProcess s_instance = new DosboxProcess();
++
++	private DosboxProcess()
++	{
++	}
++
++	/// <summary>The API's DOSBox as a one-element array, or null when no API answers (like GetProcessesByName finding nothing).</summary>
++	public static DosboxProcess[] GetAll()
++	{
++		if (!DosboxApi.IsAlive)
++		{
++			return null;
++		}
++		return new DosboxProcess[1] { s_instance };
++	}
++
++	public int Id => DosboxApi.PseudoPid;
++
++	public IntPtr Handle => DosboxApi.ProcessHandle;
++
++	public bool HasExited => !DosboxApi.IsAlive;
++
++	public string MainWindowTitle => DosboxApi.WindowTitle;
++
++	public override string ToString()
++	{
++		return $"DOSBox Staging API {DosboxApi.Version} on port {DosboxApi.Port}";
++	}
++}
+diff --git a/Staging/DosboxWindow.cs b/Staging/DosboxWindow.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a94f5ed9e2f52d4913099c4e1a8a407b0e440bda
+--- /dev/null
++++ b/Staging/DosboxWindow.cs
+@@ -0,0 +1,126 @@
++// The DOSBox window for the Where Are We? port.
++//
++// On Windows this is DOSBox Staging's real top-level window (the process that owns the API's listening
++// port), so focusing, positioning and posting keys to it work as in the original. Elsewhere, or when it
++// can't be found, a stand-in handle represents it and NativeMethods answers for it.
++
++using System;
++using System.Runtime.InteropServices;
++
++namespace WhereAreWe;
++
++public static class DosboxWindow
++{
++	private static IntPtr s_hwnd = IntPtr.Zero;
++
++	private static int s_port;
++
++	/// <summary>True for the stand-in handle and for the real DOSBox window found last.</summary>
++	public static bool IsDosbox(IntPtr hWnd)
++	{
++		if (hWnd != IntPtr.Zero)
++		{
++			if (!(hWnd == DosboxApi.PseudoWindow))
++			{
++				return hWnd == s_hwnd;
++			}
++			return true;
++		}
++		return false;
++	}
++
++	/// <summary>The DOSBox window, the stand-in handle, or IntPtr.Zero when no DOSBox Staging API answers.</summary>
++	public static IntPtr Find()
++	{
++		if (!DosboxApi.IsAlive)
++		{
++			s_hwnd = IntPtr.Zero;
++			return IntPtr.Zero;
++		}
++		if (!NativeMethods.Win32)
++		{
++			return DosboxApi.PseudoWindow;
++		}
++		if (s_hwnd != IntPtr.Zero && s_port == DosboxApi.Port && NativeMethods.IsWindow(s_hwnd))
++		{
++			return s_hwnd;
++		}
++		s_hwnd = IntPtr.Zero;
++		s_port = DosboxApi.Port;
++		try
++		{
++			// WAW's DOSBoxClass setting (default ^SDL_App$) never took part in its window search (WindowFinder
++			// doesn't store the class pattern), so it isn't used here either: the pid identifies the window.
++			int pid = ListeningPid(DosboxApi.Port);
++			if (pid > 0)
++			{
++				NativeMethods.EnumWindows(delegate(IntPtr hWnd, IntPtr lParam)
++				{
++					NativeMethods.GetWindowThreadProcessId(hWnd, out var processId);
++					if (processId == pid && NativeMethods.IsWindowVisible(hWnd) && NativeMethods.GetWindow(hWnd, NativeMethods.GetWindow_Cmd.GW_OWNER) == IntPtr.Zero)
++					{
++						s_hwnd = hWnd;
++						return false;
++					}
++					return true;
++				}, IntPtr.Zero);
++			}
++		}
++		catch (Exception ex)
++		{
++			Global.LogWarning("DOSBox window lookup failed: " + ex.Message);
++		}
++		if (!(s_hwnd != IntPtr.Zero))
++		{
++			return DosboxApi.PseudoWindow;
++		}
++		return s_hwnd;
++	}
++
++	private const int AF_INET = 2;
++
++	private const int AF_INET6 = 23;
++
++	private const int TCP_TABLE_OWNER_PID_LISTENER = 3;
++
++	[DllImport("iphlpapi.dll", SetLastError = true)]
++	private static extern uint GetExtendedTcpTable(IntPtr pTcpTable, ref int dwOutBufLen, bool sort, int ipVersion, int tblClass, uint reserved);
++
++	/// <summary>Process id listening on a local TCP port (IPv4 or IPv6), 0 if none.</summary>
++	private static int ListeningPid(int port)
++	{
++		foreach (int family in new int[2] { AF_INET, AF_INET6 })
++		{
++			int size = 0;
++			GetExtendedTcpTable(IntPtr.Zero, ref size, sort: false, family, TCP_TABLE_OWNER_PID_LISTENER, 0u);
++			IntPtr table = Marshal.AllocHGlobal(size);
++			try
++			{
++				if (GetExtendedTcpTable(table, ref size, sort: false, family, TCP_TABLE_OWNER_PID_LISTENER, 0u) != 0)
++				{
++					continue;
++				}
++				int rows = Marshal.ReadInt32(table);
++				// MIB_TCPROW_OWNER_PID: state, local addr, local port, remote addr, remote port, pid (6 DWORDs)
++				// MIB_TCP6ROW_OWNER_PID: local addr[16], scope, local port, remote addr[16], scope, remote port, state, pid
++				int rowSize = family == AF_INET ? 24 : 56;
++				int portOffset = family == AF_INET ? 8 : 20;
++				int pidOffset = family == AF_INET ? 20 : 52;
++				for (int i = 0; i < rows; i++)
++				{
++					IntPtr row = IntPtr.Add(table, 4 + i * rowSize);
++					int rowPort = Marshal.ReadByte(row, portOffset) << 8 | Marshal.ReadByte(row, portOffset + 1);
++					if (rowPort == port)
++					{
++						return Marshal.ReadInt32(row, pidOffset);
++					}
++				}
++			}
++			finally
++			{
++				Marshal.FreeHGlobal(table);
++			}
++		}
++		return 0;
++	}
++}
+diff --git a/Staging/PortableSettings.cs b/Staging/PortableSettings.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5defaef5d5b7fe477d3fdae4a903832cc08ee66f
+--- /dev/null
++++ b/Staging/PortableSettings.cs
+@@ -0,0 +1,199 @@
++// Portable settings: when a file named WhereAreWe.settings sits next to WhereAreWe.exe, Where Are We? keeps its
++// settings in that file (XML) instead of the user's profile, and its autosave file next to it instead of %TEMP%.
++// That keeps a copy installed in a portable collection (eXoDOS's util\WhereAreWe) self-contained. An empty file
++// works as the switch. Without the file the settings go where .NET puts them (LocalFileSettingsProvider).
++
++using System;
++using System.Collections.Generic;
++using System.Collections.Specialized;
++using System.Configuration;
++using System.IO;
++using System.Xml.Linq;
++
++namespace WhereAreWe;
++
++public sealed class PortableSettingsProvider : SettingsProvider, IApplicationSettingsProvider
++{
++	public const string FileName = "WhereAreWe.settings";
++
++	private const string AutoSaveDefault = "%TEMP%\\WhereAreWe-autosave.waw";
++
++	private const string ScriptsDumpDefault = "%TEMP%\\WAW_Scripts.txt";
++
++	private readonly LocalFileSettingsProvider m_local = new LocalFileSettingsProvider();
++
++	/// <summary>The settings file when running portable, else null.</summary>
++	public static string FilePath { get; private set; }
++
++	public override string ApplicationName
++	{
++		get
++		{
++			return m_local.ApplicationName;
++		}
++		set
++		{
++			m_local.ApplicationName = value;
++		}
++	}
++
++	/// <summary>Turns portable mode on if the settings file exists; call before the first use of the settings.</summary>
++	public static void Configure()
++	{
++		string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, FileName);
++		FilePath = File.Exists(path) ? path : null;
++	}
++
++	/// <summary>In portable mode, files that default to %TEMP% go next to the program instead.</summary>
++	public static void MoveTempFiles()
++	{
++		if (FilePath == null)
++		{
++			return;
++		}
++		string dir = Path.GetDirectoryName(FilePath);
++		if (Properties.Settings.Default.AutoSaveFile == AutoSaveDefault)
++		{
++			Properties.Settings.Default.AutoSaveFile = Path.Combine(dir, "WhereAreWe-autosave.waw");
++		}
++		if (Properties.Settings.Default.ScriptsDumpFile == ScriptsDumpDefault)
++		{
++			Properties.Settings.Default.ScriptsDumpFile = Path.Combine(dir, "WAW_Scripts.txt");
++		}
++	}
++
++	public override void Initialize(string name, NameValueCollection config)
++	{
++		base.Initialize(string.IsNullOrEmpty(name) ? nameof(PortableSettingsProvider) : name, config);
++		m_local.Initialize(null, null);
++	}
++
++	public override SettingsPropertyValueCollection GetPropertyValues(SettingsContext context, SettingsPropertyCollection collection)
++	{
++		if (FilePath == null)
++		{
++			return m_local.GetPropertyValues(context, collection);
++		}
++		Dictionary<string, XElement> stored = Load();
++		SettingsPropertyValueCollection values = new SettingsPropertyValueCollection();
++		foreach (SettingsProperty property in collection)
++		{
++			SettingsPropertyValue value = new SettingsPropertyValue(property);
++			if (stored.TryGetValue(property.Name, out XElement element))
++			{
++				if ((string)element.Attribute("binary") == "true")
++				{
++					value.SerializedValue = Convert.FromBase64String(element.Value);
++				}
++				else
++				{
++					value.SerializedValue = element.Value;
++				}
++			}
++			value.IsDirty = false;
++			values.Add(value);
++		}
++		return values;
++	}
++
++	public override void SetPropertyValues(SettingsContext context, SettingsPropertyValueCollection collection)
++	{
++		if (FilePath == null)
++		{
++			m_local.SetPropertyValues(context, collection);
++			return;
++		}
++		Dictionary<string, XElement> stored = Load();
++		foreach (SettingsPropertyValue value in collection)
++		{
++			if (!value.IsDirty && value.UsingDefaultValue)
++			{
++				continue;
++			}
++			object serialized = value.SerializedValue;
++			XElement element = new XElement("setting", new XAttribute("name", value.Name));
++			if (serialized is byte[] bytes)
++			{
++				element.Add(new XAttribute("binary", "true"), Convert.ToBase64String(bytes));
++			}
++			else if (serialized != null)
++			{
++				element.Add(serialized.ToString());
++			}
++			else
++			{
++				stored.Remove(value.Name);
++				continue;
++			}
++			stored[value.Name] = element;
++		}
++		Save(stored);
++	}
++
++	public SettingsPropertyValue GetPreviousVersion(SettingsContext context, SettingsProperty property)
++	{
++		if (FilePath == null)
++		{
++			return m_local.GetPreviousVersion(context, property);
++		}
++		return new SettingsPropertyValue(property);
++	}
++
++	public void Reset(SettingsContext context)
++	{
++		if (FilePath == null)
++		{
++			m_local.Reset(context);
++			return;
++		}
++		Save(new Dictionary<string, XElement>());
++	}
++
++	public void Upgrade(SettingsContext context, SettingsPropertyCollection properties)
++	{
++		if (FilePath == null)
++		{
++			m_local.Upgrade(context, properties);
++		}
++	}
++
++	private static Dictionary<string, XElement> Load()
++	{
++		Dictionary<string, XElement> stored = new Dictionary<string, XElement>();
++		try
++		{
++			if (new FileInfo(FilePath).Length == 0)
++			{
++				return stored;
++			}
++			foreach (XElement element in XDocument.Load(FilePath).Root.Elements("setting"))
++			{
++				string name = (string)element.Attribute("name");
++				if (name != null)
++				{
++					stored[name] = element;
++				}
++			}
++		}
++		catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is System.Xml.XmlException)
++		{
++			Global.Log("Could not read {0}: {1}", FilePath, ex.Message);
++		}
++		return stored;
++	}
++
++	private static void Save(Dictionary<string, XElement> stored)
++	{
++		List<string> names = new List<string>(stored.Keys);
++		names.Sort(StringComparer.Ordinal);
++		XElement root = new XElement("WhereAreWe");
++		foreach (string name in names)
++		{
++			root.Add(stored[name]);
++		}
++		string temp = FilePath + ".tmp";
++		new XDocument(root).Save(temp);
++		File.Copy(temp, FilePath, overwrite: true);
++		File.Delete(temp);
++	}
++}
+diff --git a/Staging/WinFormsSplitContainer.cs b/Staging/WinFormsSplitContainer.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0dc887eadaaa6052aa007b0d58eabde820ecd9cd
+--- /dev/null
++++ b/Staging/WinFormsSplitContainer.cs
+@@ -0,0 +1,178 @@
++// Majorsilence.Forms build only: a SplitContainer that behaves like WinForms' where Where Are We? relies on it.
++// tools/build_msf.py makes every designer-created SplitContainer one of these; ScalableSplitContainer derives
++// from it.
++//  - Resizing: Majorsilence rescales the split from the previous size, so a clamp at a transient size (hidden
++//    tab pages and fresh controls are laid out at their default sizes first) loses the split for good: Party
++//    Information's quick-reference list ended up as a sliver at the right edge. WinForms remembers what the
++//    last SplitterDistance assignment asked for -- the ratio (FixedPanel.None) or the fixed panel's size --
++//    and recomputes from that.
++//  - Panel sizes: WinForms sizes the panels as soon as the split or the container changes, even while layout
++//    is suspended; Majorsilence docks them on the next layout. Children anchored in a panel take their
++//    distances from the panel's size when the designer code places them, so they need the real size then
++//    (Quests' goal list grew to twice its size).
++//  - Collapsing: a collapsed panel gives its space to the other one and the splitter disappears.
++
++#if MAJORSILENCE_FORMS
++using System;
++using System.Drawing;
++using System.Linq;
++using Majorsilence.Forms;
++
++namespace WhereAreWe;
++
++public class WinFormsSplitContainer : SplitContainer
++{
++	private double m_splitRatio;
++
++	private int m_fixedPanelSize;
++
++	private bool m_bAdjusting;
++
++	public WinFormsSplitContainer()
++	{
++		// Panel1's size changes outside this class only when the split is set, by code or by dragging
++		Panel1.SizeChanged += delegate
++		{
++			if (!m_bAdjusting)
++			{
++				RememberSplit();
++				m_bAdjusting = true;
++				try
++				{
++					SizePanels();
++				}
++				finally
++				{
++					m_bAdjusting = false;
++				}
++			}
++		};
++		SizeChanged += delegate
++		{
++			if (!m_bAdjusting)
++			{
++				m_bAdjusting = true;
++				try
++				{
++					ApplyRememberedSplit();
++					SizePanels();
++				}
++				finally
++				{
++					m_bAdjusting = false;
++				}
++			}
++		};
++	}
++
++	private int SplitExtent => (Orientation == Orientation.Vertical) ? ClientSize.Width : ClientSize.Height;
++
++	private void RememberSplit()
++	{
++		int extent = SplitExtent;
++		if (extent > 0)
++		{
++			m_splitRatio = (double)SplitterDistance / extent;
++			m_fixedPanelSize = (FixedPanel == FixedPanel.Panel2) ? (extent - SplitterDistance - SplitterWidth) : SplitterDistance;
++		}
++	}
++
++	private bool ApplyRememberedSplit()
++	{
++		int extent = SplitExtent;
++		if (extent <= 0 || m_splitRatio <= 0.0 || Panel1.Dock == DockStyle.Fill)
++		{
++			return false;
++		}
++		int distance = FixedPanel switch
++		{
++			FixedPanel.Panel1 => m_fixedPanelSize,
++			FixedPanel.Panel2 => extent - m_fixedPanelSize - SplitterWidth,
++			_ => (int)Math.Floor(extent * m_splitRatio),
++		};
++		int before = SplitterDistance;
++		if (distance != before)
++		{
++			SplitterDistance = distance;
++		}
++		return SplitterDistance != before;
++	}
++
++	private void SizePanels()
++	{
++		// (a container squeezed to nothing for a moment -- a form's client area is 0x0 before it's sized -- keeps
++		// its panels: anchored children would take the empty panel as their reference)
++		if (Panel1.Dock == DockStyle.Fill || SplitExtent <= SplitterDistance + SplitterWidth)
++		{
++			return;
++		}
++		Rectangle r = DisplayRectangle;
++		int d = SplitterDistance;
++		int start = d + SplitterWidth;
++		if (Orientation == Orientation.Vertical)
++		{
++			Panel1.Bounds = new Rectangle(r.X, r.Y, d, r.Height);
++			Panel2.Bounds = new Rectangle(r.X + start, r.Y, Math.Max(0, r.Width - start), r.Height);
++		}
++		else
++		{
++			Panel1.Bounds = new Rectangle(r.X, r.Y, r.Width, d);
++			Panel2.Bounds = new Rectangle(r.X, r.Y + start, r.Width, Math.Max(0, r.Height - start));
++		}
++	}
++
++	private bool UpdateCollapsedPanels()
++	{
++		// Majorsilence collapses a panel by hiding it; its own visibility can be told from an ancestor's only
++		// while the container is shown.
++		if (!Visible)
++		{
++			return Panel1.Dock == DockStyle.Fill;
++		}
++		bool panel2Collapsed = !Panel2.Visible;
++		DockStyle dock = panel2Collapsed ? DockStyle.Fill : ((Orientation == Orientation.Vertical) ? DockStyle.Left : DockStyle.Top);
++		bool showSplitter = Panel1.Visible && Panel2.Visible;
++		Splitter splitter = Controls.OfType<Splitter>().FirstOrDefault();
++		if (Panel1.Dock != dock || (splitter != null && splitter.Visible != showSplitter))
++		{
++			SuspendLayout();
++			Panel1.Dock = dock;
++			if (splitter != null)
++			{
++				splitter.Visible = showSplitter;
++			}
++			ResumeLayout(performLayout: false);
++		}
++		return panel2Collapsed;
++	}
++
++	protected override void OnLayout(LayoutEventArgs e)
++	{
++		// Majorsilence lays the container out from its constructor, before the panels exist
++		if (Panel1 == null)
++		{
++			base.OnLayout(e);
++			return;
++		}
++		m_bAdjusting = true;
++		FixedPanel fixedPanel = FixedPanel;
++		try
++		{
++			if (!UpdateCollapsedPanels())
++			{
++				ApplyRememberedSplit();
++			}
++			// Majorsilence would rescale the split once more, from the size of its last layout -- the default size
++			// for designer-made containers, whose layouts were suspended meanwhile. Docking the panels at that
++			// split, however briefly, makes anchored children in them take it as their reference.
++			FixedPanel = FixedPanel.Panel1;
++			base.OnLayout(e);
++		}
++		finally
++		{
++			FixedPanel = fixedPanel;
++			m_bAdjusting = false;
++		}
++	}
++}
++#endif
+diff --git a/WhereAreWe.Properties/Settings.cs b/WhereAreWe.Properties/Settings.cs
+index f2f149f207238021049185f24c9c2a3699aff055..970c01718de9cd1be0a401cb27d93727415c739d 100644
+--- a/WhereAreWe.Properties/Settings.cs
++++ b/WhereAreWe.Properties/Settings.cs
+@@ -11,6 +11,7 @@ namespace WhereAreWe.Properties;
+ 
+ [CompilerGenerated]
+ [GeneratedCode("Microsoft.VisualStudio.Editors.SettingsDesigner.SettingsSingleFileGenerator", "17.14.0.0")]
++[SettingsProvider(typeof(PortableSettingsProvider))]
+ internal sealed class Settings : ApplicationSettingsBase
+ {
+ 	private static Settings defaultInstance = (Settings)SettingsBase.Synchronized(new Settings());
+@@ -2206,6 +2207,21 @@ internal sealed class Settings : ApplicationSettingsBase
+ 		}
+ 	}
+ 
++	[UserScopedSetting]
++	[DebuggerNonUserCode]
++	[DefaultSettingValue("")]
++	public string DOSBoxApiAddress
++	{
++		get
++		{
++			return (string)this["DOSBoxApiAddress"];
++		}
++		set
++		{
++			this["DOSBoxApiAddress"] = value;
++		}
++	}
++
+ 	[UserScopedSetting]
+ 	[DebuggerNonUserCode]
+ 	[DefaultSettingValue("^SDL_App$")]
+diff --git a/WhereAreWe/AutoScaler.cs b/WhereAreWe/AutoScaler.cs
+index 824602d648bd5dba67eec83c8bb6b63e49a0b37b..4ee48a31ac761b0c7325156c2f012fc4786a08af 100644
+--- a/WhereAreWe/AutoScaler.cs
++++ b/WhereAreWe/AutoScaler.cs
+@@ -32,7 +32,15 @@ public class AutoScaler
+ 			m_lastScale = scale;
+ 			try
+ 			{
++#if MAJORSILENCE_FORMS
++				form.Size = new Size((int)Math.Round(form.Width * num), (int)Math.Round(form.Height * num));
++				foreach (Control control in form.Controls)
++				{
++					control.Scale(new SizeF(num, num));
++				}
++#else
+ 				form.Scale(new SizeF(num, num));
++#endif
+ 			}
+ 			catch (ArgumentOutOfRangeException ex)
+ 			{
+diff --git a/WhereAreWe/BT3.cs b/WhereAreWe/BT3.cs
+index 2a1adf10608a858c16de4b8e84f7b17fe4c993a6..7326699723747891604a8252e06d18c3e69294b7 100644
+--- a/WhereAreWe/BT3.cs
++++ b/WhereAreWe/BT3.cs
+@@ -13,13 +13,18 @@ public static class BT3
+ 
+ 	public static Lazy<BT3Memory> MemoryData = new Lazy<BT3Memory>();
+ 
++	public static Lazy<BT3Memory> MemoryDataThiefP = new Lazy<BT3Memory>(() => new BT3ThiefPMemory());
++
++	// Set by BT3MemoryHacker when the running game is the THIEFP.EXE build
++	public static bool ThiefP;
++
+ 	public static Lazy<BT3ItemList> ItemList = new Lazy<BT3ItemList>();
+ 
+ 	public static Lazy<BT3MonsterList> MonsterList = new Lazy<BT3MonsterList>();
+ 
+ 	public static List<BT3Spell> Spells => SpellList.Value.Spells;
+ 
+-	public static BT3Memory Memory => MemoryData.Value;
++	public static BT3Memory Memory => ThiefP ? MemoryDataThiefP.Value : MemoryData.Value;
+ 
+ 	public static BT3Locations Spots => SpotsBT3.Value;
+ 
+diff --git a/WhereAreWe/BT3Memory.cs b/WhereAreWe/BT3Memory.cs
+index d744b6099fae32389c5191b583ec0fb9dbddb589..7e05ef53c33a943854cda62584985869af614530 100644
+--- a/WhereAreWe/BT3Memory.cs
++++ b/WhereAreWe/BT3Memory.cs
+@@ -259,37 +259,37 @@ public class BT3Memory : BTMemory
+ 
+ 	public override MemoryGuess[] Guesses => Global.MemoryGuesses.Guesses[GameNames.BardsTale3];
+ 
+-	public int Wilderness => -81010;
++	public virtual int Wilderness => -81010;
+ 
+-	public int CurrentMonsters => -29065;
++	public virtual int CurrentMonsters => -29065;
+ 
+-	public int MapSize => -81057;
++	public virtual int MapSize => -81057;
+ 
+-	public int MapSizeDungeons => -81043;
++	public virtual int MapSizeDungeons => -81043;
+ 
+-	public int ScriptBits => 50937;
++	public virtual int ScriptBits => 50937;
+ 
+-	public int MapFlags => 51027;
++	public virtual int MapFlags => 51027;
+ 
+-	public int CreationStatsAlt => 59349;
++	public virtual int CreationStatsAlt => 59349;
+ 
+-	public int CreationHP => -1414;
++	public virtual int CreationHP => -1414;
+ 
+-	public int SelectedSpellSurface => 58569;
++	public virtual int SelectedSpellSurface => 58569;
+ 
+-	public int SelectedSpellSurfaceCombat => 58247;
++	public virtual int SelectedSpellSurfaceCombat => 58247;
+ 
+-	public int SelectedSpellDungeon => 58605;
++	public virtual int SelectedSpellDungeon => 58605;
+ 
+-	public int SelectedSpellDungeonCombat => 58283;
++	public virtual int SelectedSpellDungeonCombat => 58283;
+ 
+-	public int StackOffsetIndex => -206915;
++	public virtual int StackOffsetIndex => -206915;
+ 
+-	public int CastingCharSurface => 59393;
++	public virtual int CastingCharSurface => 59393;
+ 
+-	public int CastingCharDungeon => 59425;
++	public virtual int CastingCharDungeon => 59425;
+ 
+-	public int MapLoadingStatus => -206932;
++	public virtual int MapLoadingStatus => -206932;
+ 
+ 	public BT3Memory()
+ 	{
+diff --git a/WhereAreWe/BT3MemoryHacker.cs b/WhereAreWe/BT3MemoryHacker.cs
+index b3b0a7b938e39b711343a703ff8647a35cdf7afc..397f898bc587e456fec7e733875521ec78b5e783 100644
+--- a/WhereAreWe/BT3MemoryHacker.cs
++++ b/WhereAreWe/BT3MemoryHacker.cs
+@@ -96,6 +96,8 @@ public class BT3MemoryHacker : BTMemoryHacker
+ 
+ 	protected override void OnReinitialized(EventArgs e)
+ 	{
++		MemoryBytes memoryBytes = ReadOffset(BT3ThiefPMemory.RuntimeFileInfoString, 11);
++		BT3.ThiefP = memoryBytes != null && Encoding.ASCII.GetString(memoryBytes.Bytes) == "C_FILE_INFO";
+ 		base.OnReinitialized(e);
+ 	}
+ 
+diff --git a/WhereAreWe/BT3ThiefPMemory.cs b/WhereAreWe/BT3ThiefPMemory.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2eabde6ed0062ea34a1b945deb7328b0ae264250
+--- /dev/null
++++ b/WhereAreWe/BT3ThiefPMemory.cs
+@@ -0,0 +1,262 @@
++namespace WhereAreWe;
++
++// THIEFP.EXE, the Bard's Tale III build eXoDOS runs: another compile of the game with the data segment laid
++// out differently around the same "refugee camp" signature. Offsets = THIEF.EXE's plus the shift measured
++// per block between RAM dumps of both builds in the same game state.
++public class BT3ThiefPMemory : BT3Memory
++{
++	// The C runtime's "C_FILE_INFO" string (THIEF.EXE: 51300) tells the builds apart.
++	public const int RuntimeFileInfoString = 50322;
++
++	// far map segment
++	public override int Map => -81071;
++
++	public override int MapSpecials => -81491;
++
++	public override int MapSpecials2 => -80979;
++
++	public override int MapTeleport => -80403;
++
++	public override int MapFixedSquares => -80371;
++
++	public override int ForcedEncounters => -80371;
++
++	public override int MapCustomSquares => -80339;
++
++	public override int Wilderness => -81008;
++
++	public override int MapSize => -81055;
++
++	public override int MapSizeDungeons => -81041;
++
++	public override int CurrentMonsters => -29063;
++
++	public override int StateArray => -15807;
++
++	public override int State3 => -15779;
++
++	public override int MarchingOrder => -12843;
++
++	// party and combat block (same data-segment offsets; the signature moved 18 bytes down)
++	public override int PartyBonusAttacks => -8623;
++
++	public override int TreasureRanges => -2707;
++
++	public override int TreasureMinimums => -2691;
++
++	public override int MapGoldMax => -2577;
++
++	public override int CharCombatDamageBonus2 => -2311;
++
++	public override int PartyCombatMagicResist => -2303;
++
++	public override int PartyCombatOptions => -2299;
++
++	public override int TrapType => -2289;
++
++	public override int CharCombatDamageBonus => -2285;
++
++	public override int EncounterMonstersKilled => -2275;
++
++	public override int PartyNames => -2269;
++
++	public override int PartyInfo => -2269;
++
++	public override int CreationHP => -1396;
++
++	public override int CreationRace => -1387;
++
++	public override int PartyCombatSubOptions1 => -1307;
++
++	public override int EnemyACBonus => -1263;
++
++	public override int MonsterAC => -1263;
++
++	public override int PartyCombatSelectedSpells => -1257;
++
++	public override int EnemyDamageBonus => -1219;
++
++	public override int MonsterDamage => -1219;
++
++	public override int PartyCombatSubOptions2 => -1067;
++
++	public override int MonsterIndices => -1053;
++
++	public override int ImageCaption => -994;
++
++	public override int CombatActiveSpells => -849;
++
++	public override int State1 => -839;
++
++	public override int CombatSong => -831;
++
++	public override int PartyCombatACBonus => -785;
++
++	public override int CharCombatACBonus => -785;
++
++	public override int MonsterHP => -771;
++
++	public override int AdventuringSong => -244;
++
++	public override int ItemValues => 509;
++
++	public override int MonsterGroup => 4620;
++
++	public override int MonsterExp => 4958;
++
++	public override int SpellIcon1 => 7795;
++
++	public override int SpellIcon2 => 7796;
++
++	public override int SpellIcon3 => 7797;
++
++	public override int SpellIcon4 => 7798;
++
++	public override int SpellIcon5 => 7799;
++
++	public override int ItemList => 15335;
++
++	public override int ItemCharges => 15335;
++
++	public override int ItemDamage => 15591;
++
++	public override int ItemACBonus => 15847;
++
++	public override int ItemTypes => 16103;
++
++	public override int ItemUsableBy => 16375;
++
++	public override int ItemEquipEffect => 16631;
++
++	public override int ItemEffects => 16887;
++
++	public override int SwapWallsDoors => 20444;
++
++	public override int MonsterNumAlive => 32214;
++
++	public override int EnemyLoseTurn => 32478;
++
++	public override int MonsterDistances => 32594;
++
++	public override int TownMap => 32612;
++
++	public override int MapStrings => 32612;
++
++	public override int MapSquareStrings => 32612;
++
++	public override int PartyPerishSeconds => 33265;
++
++	public override int CastingChar => 36508;
++
++	public override int NumItemsInShop => 38551;
++
++	public override int ShopInventory => 38557;
++
++	public override int CampInspectingChar => 38721;
++
++	public override int State4 => 45053;
++
++	public override int TrapExamined => 45910;
++
++	public override int ScreenText => 49726;
++
++	public override int SurfaceMapIndex => 49901;
++
++	public override int MainMapIndex => 49903;
++
++	public override int SubMapIndex => 49905;
++
++	public override int LocationNorth => 49907;
++
++	public override int LocationNorthTown => 49907;
++
++	public override int LocationEast => 49909;
++
++	public override int LocationEastTown => 49909;
++
++	public override int Facing => 49911;
++
++	public override int FacingTown => 49911;
++
++	public override int ScriptBits => 49921;
++
++	public override int Counter1 => 49937;
++
++	public override int GameTimeHours => 50001;
++
++	public override int LightDistance => 50002;
++
++	public override int SongDuration => 50003;
++
++	public override int LightDuration => 50004;
++
++	public override int CompassDuration => 50005;
++
++	public override int DetectionDuration => 50006;
++
++	public override int ShieldDuration => 50007;
++
++	public override int LevitationDuration => 50008;
++
++	public override int MapFlags => 50011;
++
++	public override int MapTreasureIndex => 50012;
++
++	public override int AdvPartyACBonus => 50018;
++
++	public override int GameTimeSeconds => 50181;
++
++	public override int SummonedCreature => 50432;
++
++	public override int AskWhichSpellCombat => 52727;
++
++	public override int AskWhichSpellCombat2 => 52749;
++
++	public override int State2 => 52830;
++
++	public override int AskWhichSong => 52839;
++
++	public override int AskWhichSpell => 52841;
++
++	public override int ShopInspectingChar => 52860;
++
++	public override int ShoppingChar => 52862;
++
++	public override int InspectingChar => 52884;
++
++	public override int StackAddressIndicator => 52918;
++
++	// stack frames: aligned by similarity only, the game code differs
++	public override int SelectedSpellSurfaceCombat => 56403;
++
++	public override int SelectedSpellDungeonCombat => 56439;
++
++	public override int SelectedSpellSurface => 56725;
++
++	public override int SelectedSpellDungeon => 56761;
++
++	public override int CombatActingChar3 => 57201;
++
++	public override int CombatActingChar1 => 57227;
++
++	public override int CombatActingChar2 => 57239;
++
++	public override int CreationStats => 57413;
++
++	public override int CreationStatsAlt => 57505;
++
++	public override int CastingCharSurface => 57549;
++
++	public override int NumChars => 57559;
++
++	public override int CastingCharDungeon => 57581;
++
++	public override int Stack => 57803;
++
++	public override int TreasureState => 91603;
++
++	// PSP+1Dh (file handle 5) and PSP+2Eh (SP saved by the last INT 21h): the program loads 6146 bytes closer
++	public override int MapLoadingStatus => -200786;
++
++	public override int StackOffsetIndex => -200769;
++}
+diff --git a/WhereAreWe/CharacterInfoControl.cs b/WhereAreWe/CharacterInfoControl.cs
+index 36e099f96a6dd829e2871961a43652605e78b165..29a90a27dd040d68eb149c76806f4b34d81b4e7e 100644
+--- a/WhereAreWe/CharacterInfoControl.cs
++++ b/WhereAreWe/CharacterInfoControl.cs
+@@ -416,7 +416,9 @@ public class CharacterInfoControl : HackerBasedUserControl, IScaleAware
+ 		}
+ 		else
+ 		{
+-			index = lv.Items.Add(new ListViewItem()).Index;
++			ListViewItem lviAdded = new ListViewItem();
++			lv.Items.Add(lviAdded);
++			index = lviAdded.Index;
+ 		}
+ 		if (item == null || item.Index == item.EmptyIndex)
+ 		{
+@@ -467,6 +469,18 @@ public class CharacterInfoControl : HackerBasedUserControl, IScaleAware
+ 		NativeMethods.SetTooltipDelay(lvEquipped, 32000);
+ 		NativeMethods.SetTooltipDelay(lvResistances, 32000);
+ 		m_szOrigEquipped = lvEquipped.Size;
++#if MAJORSILENCE_FORMS
++		// The control's Resize (SetInventorySize) runs before Majorsilence lays out the inventory panes, so the
++		// lists' columns would be fitted to their previous widths; fit them when the lists themselves resize
++		lvEquipped.SizeChanged += delegate
++		{
++			Global.FitSingleColumn(lvEquipped);
++		};
++		lvBackpack.SizeChanged += delegate
++		{
++			Global.FitSingleColumn(lvBackpack);
++		};
++#endif
+ 		m_commonCtrls.llCureAll = llCureAll;
+ 		m_commonCtrls.lvBackpack = lvBackpack;
+ 		m_commonCtrls.lvEquipped = lvEquipped;
+diff --git a/WhereAreWe/ColumnHeaderList.cs b/WhereAreWe/ColumnHeaderList.cs
+index be802512738c346ad66e591bfb2906d1c14a6fa7..4bbc010b3b04f0d08cefcfac748513557a776e8b 100644
+--- a/WhereAreWe/ColumnHeaderList.cs
++++ b/WhereAreWe/ColumnHeaderList.cs
+@@ -25,7 +25,12 @@ public class ColumnHeaderList
+ 		for (int i = 0; i < lv.Columns.Count; i++)
+ 		{
+ 			Widths.Add(lv.Columns[i].Width);
++#if MAJORSILENCE_FORMS
++			// Majorsilence reports -1 for a column whose display position was never set; WinForms its index
++			Order.Add((lv.Columns[i].DisplayIndex < 0) ? i : lv.Columns[i].DisplayIndex);
++#else
+ 			Order.Add(lv.Columns[i].DisplayIndex);
++#endif
+ 		}
+ 	}
+ 
+diff --git a/WhereAreWe/ConditionEditForm.cs b/WhereAreWe/ConditionEditForm.cs
+index 564c9e9d0c7393ba4e11e6cd597d7c108dcce372..e28a805522a80c2dd518dce581738a6861a2e248 100644
+--- a/WhereAreWe/ConditionEditForm.cs
++++ b/WhereAreWe/ConditionEditForm.cs
+@@ -298,8 +298,8 @@ public class ConditionEditForm : FullyScalableForm
+ 		this.lvConditions.TabIndex = 14;
+ 		this.lvConditions.UseCompatibleStateImageBehavior = false;
+ 		this.lvConditions.View = System.Windows.Forms.View.Details;
+-		this.lvConditions.ItemCheck += new System.Windows.Forms.ItemCheckEventHandler(lvConditions_ItemCheck);
+-		this.lvConditions.ItemChecked += new System.Windows.Forms.ItemCheckedEventHandler(lvConditions_ItemChecked);
++		this.lvConditions.ItemCheck += lvConditions_ItemCheck;
++		this.lvConditions.ItemChecked += lvConditions_ItemChecked;
+ 		this.chCondition.Text = "Condition";
+ 		this.chCondition.Width = 134;
+ 		base.AcceptButton = this.btnOK;
+diff --git a/WhereAreWe/EditBitsForm.cs b/WhereAreWe/EditBitsForm.cs
+index 87cee92795fd3244688c28ec957f653255cc207e..5af088b4a602628a8b949838d57f097d6c9e6011 100644
+--- a/WhereAreWe/EditBitsForm.cs
++++ b/WhereAreWe/EditBitsForm.cs
+@@ -264,7 +264,13 @@ public class EditBitsForm : HackerBasedForm
+ 
+ 	private void miBytesEdit_Click(object sender, EventArgs e)
+ 	{
+-		EditBytesForm editBytesForm = new EditBytesForm(base.TopLevelControl);
++		EditBytesForm editBytesForm = new EditBytesForm(
++#if MAJORSILENCE_FORMS
++			(Control)null
++#else
++			base.TopLevelControl
++#endif
++			);
+ 		editBytesForm.ForceLength = true;
+ 		editBytesForm.Bytes = BytesFromUI();
+ 		if (editBytesForm.ShowDialog() == DialogResult.OK)
+@@ -716,8 +722,8 @@ public class EditBitsForm : HackerBasedForm
+ 		this.lvBits.TabIndex = 0;
+ 		this.lvBits.UseCompatibleStateImageBehavior = false;
+ 		this.lvBits.View = System.Windows.Forms.View.Details;
+-		this.lvBits.ItemCheck += new System.Windows.Forms.ItemCheckEventHandler(lvBits_ItemCheck);
+-		this.lvBits.ItemChecked += new System.Windows.Forms.ItemCheckedEventHandler(lvBits_ItemChecked);
++		this.lvBits.ItemCheck += lvBits_ItemCheck;
++		this.lvBits.ItemChecked += lvBits_ItemChecked;
+ 		this.lvBits.KeyDown += new System.Windows.Forms.KeyEventHandler(lvBits_KeyDown);
+ 		this.chBitIndex.Text = "Bit";
+ 		this.chBitIndex.Width = 50;
+diff --git a/WhereAreWe/EditDnDSpellsForm.cs b/WhereAreWe/EditDnDSpellsForm.cs
+index 67d4aa73e154f32c365dba46e9b43d344b98c954..6cbd0a9576683d9c52dd333a6e26add5d6a09eed 100644
+--- a/WhereAreWe/EditDnDSpellsForm.cs
++++ b/WhereAreWe/EditDnDSpellsForm.cs
+@@ -661,7 +661,7 @@ public class EditDnDSpellsForm : CommonKeyForm
+ 		this.lvSpells.UseCompatibleStateImageBehavior = false;
+ 		this.lvSpells.View = System.Windows.Forms.View.Details;
+ 		this.lvSpells.ColumnClick += new System.Windows.Forms.ColumnClickEventHandler(lvSpells_ColumnClick);
+-		this.lvSpells.ItemCheck += new System.Windows.Forms.ItemCheckEventHandler(lvSpells_ItemCheck);
++		this.lvSpells.ItemCheck += lvSpells_ItemCheck;
+ 		this.lvSpells.SelectedIndexChanged += new System.EventHandler(lvSpells_SelectedIndexChanged);
+ 		this.chType.Text = "Type";
+ 		this.chType.Width = 50;
+diff --git a/WhereAreWe/EditInventoryTableForm.cs b/WhereAreWe/EditInventoryTableForm.cs
+index df344a01b654beb3a8eab09acc5b18ad855cfc39..66e4518af39b1390b6a3dd0371b2412f389e3cf9 100644
+--- a/WhereAreWe/EditInventoryTableForm.cs
++++ b/WhereAreWe/EditInventoryTableForm.cs
+@@ -1098,7 +1098,7 @@ public class EditInventoryTableForm : CommonKeyForm
+ 		this.lvMasterItems.UseCompatibleStateImageBehavior = false;
+ 		this.lvMasterItems.View = System.Windows.Forms.View.Details;
+ 		this.lvMasterItems.ColumnClick += new System.Windows.Forms.ColumnClickEventHandler(lvMasterItems_ColumnClick);
+-		this.lvMasterItems.ItemDrag += new System.Windows.Forms.ItemDragEventHandler(lvMasterItems_ItemDrag);
++		this.lvMasterItems.ItemDrag += lvMasterItems_ItemDrag;
+ 		this.lvMasterItems.DragEnter += new System.Windows.Forms.DragEventHandler(lvMasterItems_DragEnter);
+ 		this.lvMasterItems.DragOver += new System.Windows.Forms.DragEventHandler(lvMasterItems_DragOver);
+ 		this.lvMasterItems.DoubleClick += new System.EventHandler(lvMasterItems_DoubleClick);
+diff --git a/WhereAreWe/EditLabelsForm.cs b/WhereAreWe/EditLabelsForm.cs
+index b5bcae183ff3b8fb7474f711ea966e902e9268e0..ed3ca88da63782f097ae0240dda062aab03724c1 100644
+--- a/WhereAreWe/EditLabelsForm.cs
++++ b/WhereAreWe/EditLabelsForm.cs
+@@ -214,7 +214,7 @@ public class EditLabelsForm : HackerBasedForm
+ 			mapLabels.Add(mapLabel.Clone());
+ 		}
+ 		MapSquareArray data = new MapSquareArray(mapLabels);
+-		DataFormats.Format format = DataFormats.GetFormat(typeof(MapSquareArray).FullName);
++		var format = DataFormats.GetFormat(typeof(MapSquareArray).FullName);
+ 		DataObject dataObject = new DataObject();
+ 		((IDataObject)dataObject).SetData(format.Name, false, (object)data);
+ 		Clipboard.SetDataObject(dataObject, copy: false);
+@@ -398,7 +398,9 @@ public class EditLabelsForm : HackerBasedForm
+ 		{
+ 			pt = new PointF(pt.X + 0.25f, pt.Y + 0.25f);
+ 		}
+-		lvLabels.Items.Add(NewLVI(new MapLabel(pt, "New Label"))).Selected = true;
++		ListViewItem lviLabel = NewLVI(new MapLabel(pt, "New Label"));
++		lvLabels.Items.Add(lviLabel);
++		lviLabel.Selected = true;
+ 		LabelsChanged();
+ 	}
+ 
+diff --git a/WhereAreWe/EditTriggerListForm.cs b/WhereAreWe/EditTriggerListForm.cs
+index 2422eb66ecf3b972b4542ace4c02e4218951d6f8..96edbf0003feff73436a8c0286f702f383a77eba 100644
+--- a/WhereAreWe/EditTriggerListForm.cs
++++ b/WhereAreWe/EditTriggerListForm.cs
+@@ -486,7 +486,7 @@ public class EditTriggerListForm : CommonKeyForm
+ 		this.lvTriggers.TipDuration = 30000;
+ 		this.lvTriggers.UseCompatibleStateImageBehavior = false;
+ 		this.lvTriggers.View = System.Windows.Forms.View.Details;
+-		this.lvTriggers.ItemChecked += new System.Windows.Forms.ItemCheckedEventHandler(lvTriggers_ItemChecked);
++		this.lvTriggers.ItemChecked += lvTriggers_ItemChecked;
+ 		this.lvTriggers.SelectedIndexChanged += new System.EventHandler(lvTriggers_SelectedIndexChanged);
+ 		this.lvTriggers.DoubleClick += new System.EventHandler(lvTriggers_DoubleClick);
+ 		this.chEntity.Text = "Item (check to enable)";
+diff --git a/WhereAreWe/EncounterForm.cs b/WhereAreWe/EncounterForm.cs
+index d680791e8d8fe305b125e945eaa2cf1b15f8f409..05f7f1c6e905dc809495b3d035e8bfc1e8174ece 100644
+--- a/WhereAreWe/EncounterForm.cs
++++ b/WhereAreWe/EncounterForm.cs
+@@ -713,7 +713,14 @@ public class EncounterForm : HackerBasedForm
+ 	private ListViewItem NewMonsterLVI(bool bRanged, bool bPreEncounter, Monster monster, string strPrefix, Proximity prox)
+ 	{
+ 		ListViewItem listViewItem = new ListViewItem();
++#if MAJORSILENCE_FORMS
++		for (int iSub = 0; iSub < 13; iSub++)
++		{
++			listViewItem.SubItems.Add(new ListViewItem.ListViewSubItem());
++		}
++#else
+ 		listViewItem.SubItems.AddRange(new string[13]);
++#endif
+ 		UpdateMonsterLVI(listViewItem, bRanged, bPreEncounter, monster, strPrefix, prox);
+ 		return listViewItem;
+ 	}
+diff --git a/WhereAreWe/FontScaler.cs b/WhereAreWe/FontScaler.cs
+index 4fac0c79553caa6805fad6bfb257911e5e0f1fe8..f4eb9e3c00fcad86187395a0603c281f11d21e1a 100644
+--- a/WhereAreWe/FontScaler.cs
++++ b/WhereAreWe/FontScaler.cs
+@@ -56,7 +56,7 @@ public class FontScaler
+ 		}
+ 	}
+ 
+-	public static void SetFontScaling(Control.ControlCollection collection, Control container = null)
++	public static void SetFontScaling(Control.ControlCollection collection, object container = null)
+ 	{
+ 		if (DisableFontScaling || collection == null || collection.Count == 0)
+ 		{
+@@ -274,11 +274,17 @@ public class FontScaler
+ 	{
+ 		if (!DisableFontScaling)
+ 		{
++#if MAJORSILENCE_FORMS
++			// A Majorsilence.Forms tool strip item has no ambient font until one is set.
++			Font font = ctrl.Font ?? ctrl.Owner?.Font ?? Control.DefaultFont;
++#else
++			Font font = ctrl.Font;
++#endif
+ 			if (origSize < 1f)
+ 			{
+-				origSize = ctrl.Font.Size;
++				origSize = font.Size;
+ 			}
+-			ctrl.Font = new Font(ctrl.Font.FontFamily, origSize * (float)scale / 100f);
++			ctrl.Font = new Font(font.FontFamily, origSize * (float)scale / 100f);
+ 		}
+ 	}
+ 
+diff --git a/WhereAreWe/ForbiddenSpellsEditForm.cs b/WhereAreWe/ForbiddenSpellsEditForm.cs
+index 72bc12c900468efa10c2c15019d09df5f2b43ad5..b502849e72a718fe6640455285a186476aacc3c6 100644
+--- a/WhereAreWe/ForbiddenSpellsEditForm.cs
++++ b/WhereAreWe/ForbiddenSpellsEditForm.cs
+@@ -130,7 +130,7 @@ public class ForbiddenSpellsEditForm : FullyScalableForm
+ 		CheckAll(this, bCheck: false);
+ 	}
+ 
+-	private void CheckAll(Control ctrl, bool bCheck)
++	private void CheckAll(object ctrl, bool bCheck)
+ 	{
+ 		foreach (ListViewItem item in lvSpells.Items)
+ 		{
+@@ -225,7 +225,7 @@ public class ForbiddenSpellsEditForm : FullyScalableForm
+ 		this.lvSpells.TabIndex = 0;
+ 		this.lvSpells.UseCompatibleStateImageBehavior = false;
+ 		this.lvSpells.View = System.Windows.Forms.View.Details;
+-		this.lvSpells.ItemChecked += new System.Windows.Forms.ItemCheckedEventHandler(lvSpells_ItemChecked);
++		this.lvSpells.ItemChecked += lvSpells_ItemChecked;
+ 		this.chForbidden.Text = "Forbidden on this map";
+ 		this.chForbidden.Width = 187;
+ 		base.AcceptButton = this.btnOK;
+diff --git a/WhereAreWe/FullyScalableForm.cs b/WhereAreWe/FullyScalableForm.cs
+index 003f3406527edbcce9c4b30b38923bf0ad327e8e..dec59e3c08c1445a8961b9dc31573f39c048f567 100644
+--- a/WhereAreWe/FullyScalableForm.cs
++++ b/WhereAreWe/FullyScalableForm.cs
+@@ -29,6 +29,7 @@ public class FullyScalableForm : Form, IScalableSizeControl
+ 		FontScaler.SetFontScaling(base.Controls, this);
+ 	}
+ 
++#if !MAJORSILENCE_FORMS
+ 	protected override void ScaleControl(SizeF factor, BoundsSpecified specified)
+ 	{
+ 		if (!ManualScale)
+@@ -37,6 +38,7 @@ public class FullyScalableForm : Form, IScalableSizeControl
+ 		}
+ 		Scaled?.Invoke(this, new EventArgs());
+ 	}
++#endif
+ 
+ 	protected override void OnLoad(EventArgs e)
+ 	{
+diff --git a/WhereAreWe/GameShortcutsEditorForm.cs b/WhereAreWe/GameShortcutsEditorForm.cs
+index dab4877073c63213fddbb317370bddbfd684e877..5dcd091c777eb43b6a5c9fb11657a34ec5eebcf7 100644
+--- a/WhereAreWe/GameShortcutsEditorForm.cs
++++ b/WhereAreWe/GameShortcutsEditorForm.cs
+@@ -193,7 +193,7 @@ public class GameShortcutsEditorForm : FullyScalableForm
+ 		this.lvPaths.TabIndex = 0;
+ 		this.lvPaths.UseCompatibleStateImageBehavior = false;
+ 		this.lvPaths.View = System.Windows.Forms.View.Details;
+-		this.lvPaths.AfterLabelEdit += new System.Windows.Forms.LabelEditEventHandler(lvPaths_AfterLabelEdit);
++		this.lvPaths.AfterLabelEdit += lvPaths_AfterLabelEdit;
+ 		this.lvPaths.SelectedIndexChanged += new System.EventHandler(lvPaths_SelectedIndexChanged);
+ 		this.lvPaths.DoubleClick += new System.EventHandler(lvPaths_DoubleClick);
+ 		this.lvPaths.KeyDown += new System.Windows.Forms.KeyEventHandler(lvPaths_KeyDown);
+diff --git a/WhereAreWe/Games.cs b/WhereAreWe/Games.cs
+index 59e9f18307e520327ae6978a2155bf6dc7d7731e..28686bd93b7b611bb5564fab5fd276d099f248fb 100644
+--- a/WhereAreWe/Games.cs
++++ b/WhereAreWe/Games.cs
+@@ -368,7 +368,7 @@ public static class Games
+ 			GameNames.Wizardry5 => "     WIZ5$|     WIZ5 |^WIZ5\\.EXE", 
+ 			GameNames.BardsTale1 => "     BARD$|     BARD |^BARD\\.EXE", 
+ 			GameNames.BardsTale2 => "       DK$|       DK |^DK\\.EXE", 
+-			GameNames.BardsTale3 => "    THIEF$|    THIEF |^THIEF\\.EXE", 
++			GameNames.BardsTale3 => "    THIEF$|    THIEF |^THIEF\\.EXE|   THIEFP$|   THIEFP |^THIEFP\\.EXE",
+ 			GameNames.EyeOfTheBeholder1 => "   START1?$|   START1? |^START1?\\.EXE", 
+ 			GameNames.EyeOfTheBeholder2 => "   EOB2$|   EOB2 |^EOB2\\.EXE", 
+ 			GameNames.Ultima1 => "   ULTIMA$|   ULTIMA |^ULTIMA\\.EXE", 
+diff --git a/WhereAreWe/Global.cs b/WhereAreWe/Global.cs
+index 48ebde2ed2a9ec843893565c32676badbb35a81c..8720f7c7ec1e8aaf32257ca236e8a0da92d467b3 100644
+--- a/WhereAreWe/Global.cs
++++ b/WhereAreWe/Global.cs
+@@ -1549,7 +1549,19 @@ public static class Global
+ 	{
+ 		if (ctrl is SplitContainer)
+ 		{
++#if MAJORSILENCE_FORMS
++			SplitContainer split = (SplitContainer)ctrl;
++			foreach (Control child in split.Panel1.Controls.Cast<Control>().Concat(split.Panel2.Controls.Cast<Control>()))
++			{
++				if (child.ContainsFocus)
++				{
++					SelectAll(child);
++					break;
++				}
++			}
++#else
+ 			SelectAll(((SplitContainer)ctrl).ActiveControl);
++#endif
+ 		}
+ 		else if (ctrl is TextBox)
+ 		{
+@@ -2858,6 +2870,16 @@ public static class Global
+ 		};
+ 	}
+ 
++#if MAJORSILENCE_FORMS
++	public static void UpdateText(Form window, string str)
++	{
++		if (window.Text != str)
++		{
++			window.Text = str;
++		}
++	}
++
++#endif
+ 	public static void UpdateText(Control ctrl, string str)
+ 	{
+ 		if (ctrl.Text != str)
+@@ -2901,6 +2923,29 @@ public static class Global
+ 		}
+ 	}
+ 
++#if MAJORSILENCE_FORMS
++	// WinForms' AutoResizeColumns(HeaderSize) (LVSCW_AUTOSIZE_USEHEADER) stretches the last column over the rest of
++	// the list; Majorsilence sizes it to its header text like the others
++	private static void AutoResizeColumnsToHeaders(ListView lv)
++	{
++		lv.AutoResizeColumns(ColumnHeaderAutoResizeStyle.HeaderSize);
++		int last = lv.Columns.Count - 1;
++		if (last < 0)
++		{
++			return;
++		}
++		int rest = lv.ClientSize.Width;
++		for (int i = 0; i < last; i++)
++		{
++			rest -= lv.Columns[i].Width;
++		}
++		if (rest > lv.Columns[last].Width)
++		{
++			lv.Columns[last].Width = rest;
++		}
++	}
++
++#endif
+ 	public static void SizeHeadersAndContent(ListView lv, int iHeaderMargin = 0, bool bTrimLast = true, int[] maximums = null)
+ 	{
+ 		if (lv.Columns.Count < 1)
+@@ -2913,7 +2958,11 @@ public static class Global
+ 			array[i] = lv.Columns[i].Width == 0;
+ 		}
+ 		int[] array2 = new int[lv.Columns.Count];
++#if MAJORSILENCE_FORMS
++		AutoResizeColumnsToHeaders(lv);
++#else
+ 		lv.AutoResizeColumns(ColumnHeaderAutoResizeStyle.HeaderSize);
++#endif
+ 		if (iHeaderMargin > 0 && lv.Columns.Count > 0)
+ 		{
+ 			lv.Columns[lv.Columns.Count - 1].Width -= iHeaderMargin;
+@@ -2956,7 +3005,11 @@ public static class Global
+ 		{
+ 			return;
+ 		}
++#if MAJORSILENCE_FORMS
++		AutoResizeColumnsToHeaders(lv);
++#else
+ 		lv.AutoResizeColumns(ColumnHeaderAutoResizeStyle.HeaderSize);
++#endif
+ 		if (iHeaderMargin > 0)
+ 		{
+ 			lv.Columns[lv.Columns.Count - 1].Width -= iHeaderMargin;
+@@ -3143,7 +3196,12 @@ public static class Global
+ 				{
+ 					lv.Columns[i].Width = 0;
+ 				}
++#if MAJORSILENCE_FORMS
++				// -1s saved by an earlier Majorsilence run moved each column to the front: reversed order
++				if (colWidths.Order.Count > i && colWidths.Order[i] >= 0 && colWidths.Order[i] < lv.Columns.Count)
++#else
+ 				if (colWidths.Order.Count > i && colWidths.Order[i] < lv.Columns.Count)
++#endif
+ 				{
+ 					lv.Columns[i].DisplayIndex = colWidths.Order[i];
+ 				}
+@@ -3838,7 +3896,12 @@ public static class Global
+ 				memoryStream.Write(array, 0, num);
+ 			}
+ 		}
++#if MAJORSILENCE_FORMS
++		// .NET 5+ GZipStream returns short reads before the end; .NET Framework's filled the buffer.
++		while (num > 0);
++#else
+ 		while (num == 1024);
++#endif
+ 		return memoryStream.ToArray();
+ 	}
+ 
+diff --git a/WhereAreWe/InventoryManipulatorForm.cs b/WhereAreWe/InventoryManipulatorForm.cs
+index 6c347792105b193a27ee75771080b72ef9b26169..c6c3fab6fb60eb7275dd27255b404afa2462fe2e 100644
+--- a/WhereAreWe/InventoryManipulatorForm.cs
++++ b/WhereAreWe/InventoryManipulatorForm.cs
+@@ -1109,7 +1109,7 @@ public class InventoryManipulatorForm : HackerBasedForm
+ 		this.lvBackpack.TabIndex = 2;
+ 		this.lvBackpack.UseCompatibleStateImageBehavior = false;
+ 		this.lvBackpack.View = System.Windows.Forms.View.Details;
+-		this.lvBackpack.ItemDrag += new System.Windows.Forms.ItemDragEventHandler(lvBackpack_ItemDrag);
++		this.lvBackpack.ItemDrag += lvBackpack_ItemDrag;
+ 		this.lvBackpack.DragDrop += new System.Windows.Forms.DragEventHandler(lvBackpack_DragDrop);
+ 		this.lvBackpack.DragEnter += new System.Windows.Forms.DragEventHandler(lvBackpack_DragEnter);
+ 		this.lvBackpack.DragOver += new System.Windows.Forms.DragEventHandler(lvBackpack_DragOver);
+@@ -1152,7 +1152,7 @@ public class InventoryManipulatorForm : HackerBasedForm
+ 		this.lvBag.UseCompatibleStateImageBehavior = false;
+ 		this.lvBag.View = System.Windows.Forms.View.Details;
+ 		this.lvBag.ColumnClick += new System.Windows.Forms.ColumnClickEventHandler(lvBag_ColumnClick);
+-		this.lvBag.ItemDrag += new System.Windows.Forms.ItemDragEventHandler(lvBag_ItemDrag);
++		this.lvBag.ItemDrag += lvBag_ItemDrag;
+ 		this.lvBag.DragDrop += new System.Windows.Forms.DragEventHandler(lvBag_DragDrop);
+ 		this.lvBag.DragEnter += new System.Windows.Forms.DragEventHandler(lvBag_DragEnter);
+ 		this.lvBag.DragOver += new System.Windows.Forms.DragEventHandler(lvBag_DragOver);
+@@ -1232,7 +1232,7 @@ public class InventoryManipulatorForm : HackerBasedForm
+ 		this.lvFilterAlign.TabIndex = 0;
+ 		this.lvFilterAlign.UseCompatibleStateImageBehavior = false;
+ 		this.lvFilterAlign.View = System.Windows.Forms.View.Details;
+-		this.lvFilterAlign.ItemChecked += new System.Windows.Forms.ItemCheckedEventHandler(lvFilterAlign_ItemChecked);
++		this.lvFilterAlign.ItemChecked += lvFilterAlign_ItemChecked;
+ 		this.lvFilterAlign.SelectedIndexChanged += new System.EventHandler(lvFilterAlign_SelectedIndexChanged);
+ 		this.chFilterAlign.Text = "Alignment";
+ 		this.chFilterAlign.Width = 77;
+@@ -1247,7 +1247,7 @@ public class InventoryManipulatorForm : HackerBasedForm
+ 		this.lvFilterClass.TabIndex = 1;
+ 		this.lvFilterClass.UseCompatibleStateImageBehavior = false;
+ 		this.lvFilterClass.View = System.Windows.Forms.View.Details;
+-		this.lvFilterClass.ItemChecked += new System.Windows.Forms.ItemCheckedEventHandler(lvFilter_ItemChecked);
++		this.lvFilterClass.ItemChecked += lvFilter_ItemChecked;
+ 		this.lvFilterClass.SelectedIndexChanged += new System.EventHandler(lvFilter_SelectedIndexChanged);
+ 		this.chFilterClass.Text = "Class";
+ 		this.chFilterClass.Width = 84;
+diff --git a/WhereAreWe/KnownSpellsEditForm.cs b/WhereAreWe/KnownSpellsEditForm.cs
+index 06ce0da3a43e8ca70c71dcaebbe8fa2f5f4f55d7..fd188e5cd5c1a029737c900be6a3b228662e5107 100644
+--- a/WhereAreWe/KnownSpellsEditForm.cs
++++ b/WhereAreWe/KnownSpellsEditForm.cs
+@@ -455,7 +455,7 @@ public class KnownSpellsEditForm : CommonKeyForm
+ 		this.lvSpells.TabIndex = 61;
+ 		this.lvSpells.UseCompatibleStateImageBehavior = false;
+ 		this.lvSpells.View = System.Windows.Forms.View.Details;
+-		this.lvSpells.ItemCheck += new System.Windows.Forms.ItemCheckEventHandler(lvSpells_ItemCheck);
++		this.lvSpells.ItemCheck += lvSpells_ItemCheck;
+ 		this.lvSpells.SelectedIndexChanged += new System.EventHandler(lvSpells_SelectedIndexChanged);
+ 		this.chName.Text = "Name";
+ 		this.chName.Width = 170;
+diff --git a/WhereAreWe/MM3MemoryHacker.cs b/WhereAreWe/MM3MemoryHacker.cs
+index 0c93a96bffa3a051a5e73741a36547e3ef1585f9..d69acbffb633eff8fe36d69c83296c28863affcc 100644
+--- a/WhereAreWe/MM3MemoryHacker.cs
++++ b/WhereAreWe/MM3MemoryHacker.cs
+@@ -138,8 +138,27 @@ public class MM3MemoryHacker : MM345MemoryHacker
+ 		m_game = GameNames.MightAndMagic3;
+ 	}
+ 
++	// The state word above is the stack pointer DOS saved at PSP:2Eh on the game's last INT 21h call. eXoDOS
++	// starts MM3 through a 142-byte crack loader (MM3.COM) that patches the copy protection, and in that
++	// version the stack is 4 bytes deeper than in the one Where Are We? was made with.
++	private int m_stateStackAdjust = -1;
++
++	private int StateStackAdjust
++	{
++		get
++		{
++			if (m_stateStackAdjust < 0)
++			{
++				string parent = DosboxApi.ParentProgram(m_offsetFoundBlock + MM3Memory.MainState1 - 46L - DosboxApi.BlockHeader);
++				m_stateStackAdjust = (parent.EndsWith("\\MM3.COM", StringComparison.OrdinalIgnoreCase) ? 4 : 0);
++			}
++			return m_stateStackAdjust;
++		}
++	}
++
+ 	protected override void OnReinitialized(EventArgs e)
+ 	{
++		m_stateStackAdjust = -1;
+ 		MM3.MonsterList.Value.Reinitialize(this, bOverrideSanityCheck: false);
+ 		if (MM3.MonsterList.Value.UsingInternalList)
+ 		{
+@@ -351,7 +370,7 @@ public class MM3MemoryHacker : MM345MemoryHacker
+ 		}
+ 		MM3GameState mM3GameState = new MM3GameState();
+ 		mM3GameState.Location = GetLocationForce();
+-		ushort num = ReadUInt16(-123611L);
++		ushort num = (ushort)(ReadUInt16(-123611L) + StateStackAdjust);
+ 		ushort num2 = ReadUInt16(-48091L);
+ 		ushort create = ReadUInt16(41321L);
+ 		mM3GameState.IsCaster = ReadIsCaster();
+@@ -2892,9 +2911,28 @@ public class MM3MemoryHacker : MM345MemoryHacker
+ 				num += 32;
+ 			}
+ 		}
++		// The table isn't always where the header tests put it (with eXoDOS's MT-32 driver it sits 3072 bytes up,
++		// behind a header they don't know): then look for its first hit points in conventional memory
++		MemoryBytes hp = ReadOffset(num + 3328, MonsterHPStart.Length);
++		if (hp == null || !Global.Compare(hp.Bytes, MonsterHPStart))
++		{
++			long linear0 = DosboxApi.BlockHeader - (long)m_offsetFoundBlock;
++			MemoryBytes conventional = ReadOffset(linear0, 655360);
++			int at = (conventional == null) ? (-1) : FindBytes(conventional.Bytes, conventional.Bytes.Length, MonsterHPStart, 3328);
++			if (at >= 0)
++			{
++				num = (uint)(linear0 + at - 3328);
++			}
++		}
+ 		return num;
+ 	}
+ 
++	private static readonly byte[] MonsterHPStart = new byte[16]
++	{
++		5, 0, 15, 0, 10, 0, 25, 0, 20, 0,
++		10, 0, 40, 0, 40, 0
++	};
++
+ 	public byte[] GetMonsterListBytes()
+ 	{
+ 		byte[] array = new byte[2700];
+diff --git a/WhereAreWe/MM45MemoryHacker.cs b/WhereAreWe/MM45MemoryHacker.cs
+index cdd905b15b313d6b82089d454fe0ee1e84a01455..438717d262c0af15af426c97d580eefed24af8bf 100644
+--- a/WhereAreWe/MM45MemoryHacker.cs
++++ b/WhereAreWe/MM45MemoryHacker.cs
+@@ -164,6 +164,19 @@ public class MM45MemoryHacker : MM345MemoryHacker
+ 				return true;
+ 			}
+ 		}
++		// The "CD-R" marker sits in an upper memory block, whose place relative to the program depends on the
++		// DOSBox build (DOSBox Staging with eXoDOS: +814533); look around the known offsets too.
++		byte[] window = new byte[4096];
++		if (ReadOffset(813000L, window))
++		{
++			for (int j = 0; j + 4 <= window.Length; j++)
++			{
++				if (window[j] == 67 && window[j + 1] == 68 && window[j + 2] == 45 && window[j + 3] == 82)
++				{
++					return true;
++				}
++			}
++		}
+ 		return false;
+ 	}
+ 
+@@ -1573,7 +1586,80 @@ public class MM45MemoryHacker : MM345MemoryHacker
+ 		{
+ 			return ReadOffset(Memory.ScriptsNonSVN1 - m_offsetFoundBlock, ReadUInt16(Memory.ScriptsLength));
+ 		}
+-		return ReadOffset(Memory.ScriptsSVN - m_offsetFoundBlock, ReadUInt16(Memory.ScriptsLength));
++		return ReadOffset(ScriptsBlockOffset(ReadUInt16(Memory.ScriptsLength)) - m_offsetFoundBlock, ReadUInt16(Memory.ScriptsLength));
++	}
++
++	// The map's event scripts live in an EMS page whose address depends on how the DOSBox build hands out
++	// memory: DOSBox 0.74 and SVN-Daum put it at the two hard-coded addresses, DOSBox Staging elsewhere. The
++	// buffer is page aligned and its events (length byte + data) end exactly at the game's script length.
++	private long m_scriptsBlockFound = -1L;
++
++	private long ScriptsBlockOffset(ushort length)
++	{
++		if (length == 0 || IsScriptBuffer(Memory.ScriptsSVN, length))
++		{
++			return Memory.ScriptsSVN;
++		}
++		if (m_scriptsBlockFound >= 0 && IsScriptBuffer(m_scriptsBlockFound, length))
++		{
++			return m_scriptsBlockFound;
++		}
++		m_scriptsBlockFound = FindScriptBuffer(length);
++		if (m_scriptsBlockFound < 0)
++		{
++			return Memory.ScriptsSVN;
++		}
++		return m_scriptsBlockFound;
++	}
++
++	private static bool IsScriptChain(byte[] bytes, int start, int length)
++	{
++		int i = start;
++		int end = start + length;
++		while (i < end)
++		{
++			if (bytes[i] < 3)
++			{
++				return false;
++			}
++			i += bytes[i] + 1;
++		}
++		return i == end;
++	}
++
++	private bool IsScriptBuffer(long blockOffset, ushort length)
++	{
++		byte[] array = new byte[length];
++		if (!ReadDirect(blockOffset, array))
++		{
++			return false;
++		}
++		return IsScriptChain(array, 0, length);
++	}
++
++	private long FindScriptBuffer(ushort length)
++	{
++		const int page = 4096;
++		const int chunk = 65536;
++		long ramEnd = (long)DosboxApi.RamSize;
++		byte[] array = new byte[chunk + length];
++		for (long linear = 1048576L; linear + length <= ramEnd; linear += chunk)
++		{
++			int count = (int)Math.Min(array.Length, ramEnd - linear);
++			byte[] buffer = (count == array.Length) ? array : new byte[count];
++			if (!ReadDirect(linear + DosboxApi.BlockHeader, buffer))
++			{
++				continue;
++			}
++			for (int i = 0; i < chunk && i + length <= count; i += page)
++			{
++				if (IsScriptChain(buffer, i, length))
++				{
++					return linear + i + DosboxApi.BlockHeader;
++				}
++			}
++		}
++		return -1L;
+ 	}
+ 
+ 	public List<ScriptString> MM45MazeStrings(byte[] bytes)
+@@ -1700,7 +1786,7 @@ public class MM45MemoryHacker : MM345MemoryHacker
+ 		{
+ 			return WriteOffset(Memory.ScriptsNonSVN1 - m_offsetFoundBlock + line.Bytes.Offset + 1, line.Bytes);
+ 		}
+-		return WriteOffset(Memory.ScriptsSVN - m_offsetFoundBlock + line.Bytes.Offset + 1, line.Bytes);
++		return WriteOffset(ScriptsBlockOffset(ReadUInt16(Memory.ScriptsLength)) - m_offsetFoundBlock + line.Bytes.Offset + 1, line.Bytes);
+ 	}
+ 
+ 	public override bool SetPartyGold(uint gold)
+diff --git a/WhereAreWe/MMEffectsEditForm.cs b/WhereAreWe/MMEffectsEditForm.cs
+index 14d6924182e4e17b89f64283d3bdf037e5a73408..5eb94d45385b67ee1805a64036f31c1d0ea8a6eb 100644
+--- a/WhereAreWe/MMEffectsEditForm.cs
++++ b/WhereAreWe/MMEffectsEditForm.cs
+@@ -99,7 +99,7 @@ public class MMEffectsEditForm : HackerBasedForm
+ 		CheckAll(this, bCheck: false);
+ 	}
+ 
+-	private void CheckAll(Control ctrl, bool bCheck)
++	private void CheckAll(object ctrl, bool bCheck)
+ 	{
+ 		foreach (ListViewItem item in lvEffects.Items)
+ 		{
+diff --git a/WhereAreWe/MMSkillEditForm.cs b/WhereAreWe/MMSkillEditForm.cs
+index 718206fd99d7205bc9566a5621d9560a95ae38ed..0698c7ee93f6862c294744526cc43790c7d3f1de 100644
+--- a/WhereAreWe/MMSkillEditForm.cs
++++ b/WhereAreWe/MMSkillEditForm.cs
+@@ -332,7 +332,7 @@ public class MMSkillEditForm : FullyScalableForm
+ 		this.lvSkills.TabIndex = 0;
+ 		this.lvSkills.UseCompatibleStateImageBehavior = false;
+ 		this.lvSkills.View = System.Windows.Forms.View.Details;
+-		this.lvSkills.ItemCheck += new System.Windows.Forms.ItemCheckEventHandler(lvSkills_ItemCheck);
++		this.lvSkills.ItemCheck += lvSkills_ItemCheck;
+ 		this.lvSkills.SelectedIndexChanged += new System.EventHandler(lvSkills_SelectedIndexChanged);
+ 		this.chName.Text = "Skill Name";
+ 		this.chName.Width = 150;
+diff --git a/WhereAreWe/MainForm.cs b/WhereAreWe/MainForm.cs
+index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..cedf6597f131d53ba30bb529f3e43582e3273f82 100644
+--- a/WhereAreWe/MainForm.cs
++++ b/WhereAreWe/MainForm.cs
+@@ -2342,7 +2342,8 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 			bool flag = false;
+ 			if (m_strCurrentFile.StartsWith(":"))
+ 			{
+-				flag = true;
++				// built-in maps: ImageCache also looks next to the program (MapSheet.DefaultDirectory)
++				flag = !File.Exists(Path.Combine(sheet.DefaultDirectory, sheet.UnvisitedBitmapFile));
+ 			}
+ 			else
+ 			{
+@@ -5819,6 +5820,13 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 		{
+ 			return Games.Name(Settings.Default.Game);
+ 		}
++#if !NETFRAMEWORK
++		// Internal maps are ":Name"; .NET Framework's Path takes the colon for a volume separator, .NET doesn't
++		if (m_strCurrentFile.StartsWith(":"))
++		{
++			return Path.GetFileNameWithoutExtension(m_strCurrentFile.Substring(1));
++		}
++#endif
+ 		return Path.GetFileNameWithoutExtension(m_strCurrentFile);
+ 	}
+ 
+@@ -6348,7 +6356,7 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 		foreach (GameNames game in implementedGames)
+ 		{
+ 			string text = Settings.Default.GameTitles.Get(game);
+-			if (text != null && !text.Contains("\\.EXE"))
++			if (text != null && (!text.Contains("\\.EXE") || text == "    THIEF$|    THIEF |^THIEF\\.EXE"))
+ 			{
+ 				text = Games.DefaultTitle(game);
+ 				Settings.Default.GameTitles.Set(game, text);
+@@ -6494,15 +6502,9 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 		{
+ 			OptionsForm.ResetSettings();
+ 		}
+-		WindowsIdentity current = WindowsIdentity.GetCurrent();
+-		if (current != null && !new WindowsPrincipal(current).IsInRole(WindowsBuiltInRole.Administrator) && Settings.Default.WarnNonAdmin)
+-		{
+-			if (MessageBox.Show("Although \"Where Are We\" will run in normal (non-administrator) mode, it will not be able to access the memory space of a DOSBox game that is being run as an administrator (which is often necessary in order for the game to write to files in the installation directory).\r\n\r\nContinue as a non-administrator (you will only be warned once)?", "Non-administrator mode detected", MessageBoxButtons.YesNo, MessageBoxIcon.Exclamation) != DialogResult.Yes)
+-			{
+-				Environment.Exit(0);
+-			}
+-			Settings.Default.WarnNonAdmin = false;
+-		}
++		// The DOSBox Staging port reads memory through DOSBox's HTTP API, so the warning about not being able to
++		// open an administrator's DOSBox process no longer applies.
++		DosboxApi.Address = Settings.Default.DOSBoxApiAddress;
+ 		Global.Windows = Settings.Default.Windows;
+ 		if (Global.Windows == null)
+ 		{
+@@ -8723,7 +8725,12 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 		int num = 1;
+ 		foreach (string path in Settings.Default.MRUList.Paths)
+ 		{
++#if MAJORSILENCE_FORMS
++			ToolStripItem toolStripItem = new ToolStripMenuItem($"&{num++} {path}");
++			miFileRecentFiles.DropDownItems.Add(toolStripItem);
++#else
+ 			ToolStripItem toolStripItem = miFileRecentFiles.DropDownItems.Add($"&{num++} {path}");
++#endif
+ 			toolStripItem.Tag = path;
+ 			toolStripItem.Click += tsi_Click;
+ 		}
+@@ -8990,6 +8997,12 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 			string text = (KeyboardHook.IsActive() ? " (hook)" : "");
+ 			if (Settings.Default.ShowCPU)
+ 			{
++#if MAJORSILENCE_FORMS
++				if (!OperatingSystem.IsWindows())
++				{
++					return strTitle;
++				}
++#endif
+ 				if (Global.CpuCounter == null)
+ 				{
+ 					Global.CpuCounter = new PerformanceCounter("Process", "% Processor Time", Process.GetCurrentProcess().ProcessName);
+@@ -9450,7 +9463,7 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 		int k;
+ 		for (k = 0; k < menuStrip1.Items.Count; k++)
+ 		{
+-			if (!(menuStrip1.Items[k].Name == "menuMaps"))
++			if (!(((ToolStripItem)menuStrip1.Items[k]).Name == "menuMaps"))
+ 			{
+ 				continue;
+ 			}
+@@ -10305,7 +10318,11 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 	{
+ 		StringsViewForm stringsViewForm = new StringsViewForm();
+ 		StringBuilder stringBuilder = new StringBuilder();
++#if MAJORSILENCE_FORMS
++		stringBuilder.AppendFormat("Config file (setup): {0}\r\n", System.Configuration.ConfigurationManager.OpenExeConfiguration(System.Configuration.ConfigurationUserLevel.PerUserRoamingAndLocal).FilePath);
++#else
+ 		stringBuilder.AppendFormat("Config file (setup): {0}\r\n", AppDomain.CurrentDomain.SetupInformation.ConfigurationFile);
++#endif
+ 		stringBuilder.AppendFormat("Config file (ConfigurationUserLevel.None): {0}\r\n", ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.None).FilePath);
+ 		stringBuilder.AppendFormat("Config file (ConfigurationUserLevel.PerUserRoaming): {0}\r\n", ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.PerUserRoaming).FilePath);
+ 		stringBuilder.AppendFormat("Config file (ConfigurationUserLevel.PerUserRoamingAndLocal): {0}\r\n", ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.PerUserRoamingAndLocal).FilePath);
+@@ -11025,7 +11042,7 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 			Rectangle rectangle4 = (useExtendedWindowRect ? NativeMethods.GetExtendedWindowRect(m_formEncounters.Handle) : bounds2);
+ 			m_formEncounters.Location = new Point(rectangle2.Left - (rectangle4.Left - bounds2.Left) - windowSnapMargins.Right, rectangle2.Bottom - (rectangle4.Top - bounds2.Top) - windowSnapMargins.Bottom);
+ 			m_formEncounters.Width = base.Width;
+-			m_formEncounters.Height = workingArea.Bottom - base.Bottom;
++			m_formEncounters.Height = workingArea.Bottom - (base.Top + base.Height);
+ 			Application.DoEvents();
+ 		}
+ 		if (m_formParty != null && !m_formParty.IsDisposed)
+diff --git a/WhereAreWe/MapBook.cs b/WhereAreWe/MapBook.cs
+index 13a96390331c1b3761fbdfc9f81739f6a8b34de2..dfa0d14e2af9139c017611ebf2a1c3e684d69d21 100644
+--- a/WhereAreWe/MapBook.cs
++++ b/WhereAreWe/MapBook.cs
+@@ -47,7 +47,9 @@ public class MapBook
+ 				string path = value;
+ 				if (value.StartsWith(":"))
+ 				{
+-					path = Assembly.GetEntryAssembly().GetName().CodeBase;
++					// The program's folder (the original took it from the CodeBase, a file:/// URI, which never
++					// named a folder: images of the built-in maps were only found in the current directory)
++					path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "WhereAreWe.exe");
+ 				}
+ 				path = Path.GetDirectoryName(path);
+ 				foreach (MapSheet sheet in Sheets)
+diff --git a/WhereAreWe/MapNote.cs b/WhereAreWe/MapNote.cs
+index 3bb2bc29c850a7968925f20289fec37a08bc4f03..5a05f2f277d29c0d336c3a71ced3999b5eee9953 100644
+--- a/WhereAreWe/MapNote.cs
++++ b/WhereAreWe/MapNote.cs
+@@ -114,7 +114,7 @@ public class MapNote
+ 
+ 	public void CopyToClipboard()
+ 	{
+-		DataFormats.Format format = DataFormats.GetFormat(typeof(MapNote).FullName);
++		var format = DataFormats.GetFormat(typeof(MapNote).FullName);
+ 		DataObject dataObject = new DataObject();
+ 		((IDataObject)dataObject).SetData(format.Name, false, (object)this);
+ 		Clipboard.SetDataObject(dataObject, copy: false);
+diff --git a/WhereAreWe/MapSheet.cs b/WhereAreWe/MapSheet.cs
+index 1691309286fa27cfd5f2ac320b6a2340eed69f00..8648d83181a79d3747ce40a5addee64908a26870 100644
+--- a/WhereAreWe/MapSheet.cs
++++ b/WhereAreWe/MapSheet.cs
+@@ -3675,7 +3675,7 @@ public class MapSheet : IDisposable, IComparable<MapSheet>
+ 	{
+ 		rc.Inflate(1, 1);
+ 		MapSquareArray data = new MapSquareArray(Grid, rc, GridLines, Labels);
+-		DataFormats.Format format = DataFormats.GetFormat(typeof(MapSquareArray).FullName);
++		var format = DataFormats.GetFormat(typeof(MapSquareArray).FullName);
+ 		DataObject dataObject = new DataObject();
+ 		((IDataObject)dataObject).SetData(format.Name, false, (object)data);
+ 		Clipboard.SetDataObject(dataObject, copy: false);
+diff --git a/WhereAreWe/MapSquareDirty.cs b/WhereAreWe/MapSquareDirty.cs
+index 45d8184c09f1a74fd6e0f7aef12198087c2ca815..134ad9af75f479f58c5eb14cbca0f3b3cca4ef4a 100644
+--- a/WhereAreWe/MapSquareDirty.cs
++++ b/WhereAreWe/MapSquareDirty.cs
+@@ -1,8 +1,13 @@
+ namespace WhereAreWe;
+ 
+-public struct MapSquareDirty(bool all)
++public struct MapSquareDirty
+ {
+-	public bool Up = (Down = (Left = (Right = (Back = all))));
++	public MapSquareDirty(bool all)
++	{
++		Up = (Down = (Left = (Right = (Back = all))));
++	}
++
++	public bool Up;
+ 
+ 	public bool Down;
+ 
+diff --git a/WhereAreWe/MemoryHacker.cs b/WhereAreWe/MemoryHacker.cs
+index c74ccf9434a3ac9f693e7be36d346777af2d9b38..bc1bddb3571d3838f8ba4d60962809fff0d52ade 100644
+--- a/WhereAreWe/MemoryHacker.cs
++++ b/WhereAreWe/MemoryHacker.cs
+@@ -65,7 +65,7 @@ public abstract class MemoryHacker : IDisposable
+ 
+ 	private IntPtr m_handleGame = IntPtr.Zero;
+ 
+-	protected Process m_processGame;
++	protected DosboxProcess m_processGame;
+ 
+ 	protected MemoryBlock m_block;
+ 
+@@ -748,12 +748,7 @@ public abstract class MemoryHacker : IDisposable
+ 
+ 	public static IntPtr FindDOSBoxWindow()
+ 	{
+-		IntPtr[] array = new WindowFinder().FindWindowByRexeg(Settings.Default.DOSBoxClass, Settings.Default.DOSBoxCaption);
+-		if (array.Length == 0)
+-		{
+-			return IntPtr.Zero;
+-		}
+-		return array[0];
++		return DosboxWindow.Find();
+ 	}
+ 
+ 	public void SetDOSBoxPosition(Point pt)
+@@ -960,13 +955,13 @@ public abstract class MemoryHacker : IDisposable
+ 
+ 	public static GameNames FindKnownGame()
+ 	{
+-		Process[] dOSBoxProcesses = GetDOSBoxProcesses();
++		DosboxProcess[] dOSBoxProcesses = GetDOSBoxProcesses();
+ 		if (dOSBoxProcesses == null)
+ 		{
+ 			return GameNames.None;
+ 		}
+-		Process[] array = dOSBoxProcesses;
+-		foreach (Process process in array)
++		DosboxProcess[] array = dOSBoxProcesses;
++		foreach (DosboxProcess process in array)
+ 		{
+ 			GameNames[] implementedGames = Games.ImplementedGames;
+ 			foreach (GameNames gameNames in implementedGames)
+@@ -1052,7 +1047,8 @@ public abstract class MemoryHacker : IDisposable
+ 	public bool Init()
+ 	{
+ 		m_bInitSuccess = false;
+-		Process gameProcess = GetGameProcess();
++		DosboxApi.Invalidate();
++		DosboxProcess gameProcess = GetGameProcess();
+ 		if (gameProcess == null)
+ 		{
+ 			return false;
+@@ -1124,7 +1120,9 @@ public abstract class MemoryHacker : IDisposable
+ 				}
+ 			}
+ 		}
+-		if (!Settings.Default.QuickScanDOSBox)
++		// Through the DOSBox Staging API a full scan of the emulated RAM is cheap, and the quick-scan guesses
++		// are offsets for DOSBox 0.74/SVN-Daum memory layouts, which Staging doesn't share: always fall back.
++		if (!Settings.Default.QuickScanDOSBox || m_processGame is DosboxProcess)
+ 		{
+ 			Global.LogWarning("Could not locate search string in DOSBox process quickly; trying full scan...");
+ 			MemoryBlock[] array5 = ScanAllBlocks(mainSearch, 1);
+@@ -1315,35 +1313,11 @@ public abstract class MemoryHacker : IDisposable
+ 		{
+ 			return DOSBoxVersion.Unknown;
+ 		}
+-		if (NativeMethods.Is64Bit(m_processGame.Handle) && !Environment.Is64BitProcess)
+-		{
+-			return DOSBoxVersion.SVNDaum;
+-		}
+-		try
+-		{
+-			if (m_processGame == null || m_processGame.HasExited)
+-			{
+-				return DOSBoxVersion.NotRunning;
+-			}
+-			FileVersionInfo fileVersionInfo = m_processGame.MainModule.FileVersionInfo;
+-			if (fileVersionInfo == null)
+-			{
+-				return DOSBoxVersion.Unknown;
+-			}
+-			if (fileVersionInfo.Comments.Contains("DOSBox Staging"))
+-			{
+-				return DOSBoxVersion.Staging;
+-			}
+-			if (fileVersionInfo.Comments[0] == '©')
+-			{
+-				return DOSBoxVersion.Classic074;
+-			}
+-		}
+-		catch (Exception)
++		if (m_processGame.HasExited)
+ 		{
+-			return DOSBoxVersion.Unknown;
++			return DOSBoxVersion.NotRunning;
+ 		}
+-		return DOSBoxVersion.SVNDaum;
++		return DOSBoxVersion.Staging;
+ 	}
+ 
+ 	public virtual bool SetGameInfoItem(GameInfoItem item)
+@@ -1422,48 +1396,20 @@ public abstract class MemoryHacker : IDisposable
+ 		return true;
+ 	}
+ 
+-	public static Process[] GetDOSBoxProcesses(string strProcessName = null)
++	public static DosboxProcess[] GetDOSBoxProcesses(string strProcessName = null)
+ 	{
+-		if (strProcessName == null)
+-		{
+-			strProcessName = Settings.Default.DosBoxProcessName;
+-		}
+-		string[] obj = new string[3]
+-		{
+-			strProcessName,
+-			strProcessName + "_debug",
+-			strProcessName + "_x64"
+-		};
+-		Process[] array = null;
+-		string[] array2 = obj;
+-		for (int i = 0; i < array2.Length; i++)
+-		{
+-			array = Process.GetProcessesByName(array2[i]);
+-			if (array.Length != 0)
+-			{
+-				break;
+-			}
+-		}
+-		if (array.Length < 1)
+-		{
+-			array = Process.GetProcessesByName(Settings.Default.DosBoxProcessName2);
+-		}
+-		if (array.Length < 1)
+-		{
+-			return null;
+-		}
+-		return array;
++		return DosboxProcess.GetAll();
+ 	}
+ 
+-	public static Process GetProcess(string strTitleMatch, string strProcessName = null)
++	public static DosboxProcess GetProcess(string strTitleMatch, string strProcessName = null)
+ 	{
+-		Process[] dOSBoxProcesses = GetDOSBoxProcesses(strProcessName);
++		DosboxProcess[] dOSBoxProcesses = GetDOSBoxProcesses(strProcessName);
+ 		if (dOSBoxProcesses == null)
+ 		{
+ 			return null;
+ 		}
+-		Process[] array = dOSBoxProcesses;
+-		foreach (Process process in array)
++		DosboxProcess[] array = dOSBoxProcesses;
++		foreach (DosboxProcess process in array)
+ 		{
+ 			if (Regex.IsMatch(process.MainWindowTitle, strTitleMatch))
+ 			{
+@@ -1656,7 +1602,7 @@ public abstract class MemoryHacker : IDisposable
+ 		return null;
+ 	}
+ 
+-	public virtual Process GetGameProcess()
++	public virtual DosboxProcess GetGameProcess()
+ 	{
+ 		return GetProcess(Settings.Default.GameTitles.Get(Game, string.Empty));
+ 	}
+diff --git a/WhereAreWe/NativeMethods.cs b/WhereAreWe/NativeMethods.cs
+index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d89e5c6c7 100644
+--- a/WhereAreWe/NativeMethods.cs
++++ b/WhereAreWe/NativeMethods.cs
+@@ -11,6 +11,9 @@ namespace WhereAreWe;
+ 
+ public static class NativeMethods
+ {
++	/// <summary>True where the Win32 API exists (Windows); elsewhere the wrappers return defaults.</summary>
++	internal static readonly bool Win32 = Environment.OSVersion.Platform == PlatformID.Win32NT;
++
+ 	public struct INPUT
+ 	{
+ 		internal uint type;
+@@ -566,24 +569,83 @@ public static class NativeMethods
+ 
+ 	public const uint MONITOR_DEFAULTTONEAREST = 2u;
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern bool ShowScrollBar(IntPtr hWnd, int wBar, bool bShow);
++	[DllImport("user32.dll", EntryPoint = "ShowScrollBar")]
++	private static extern bool ShowScrollBar_Native(IntPtr hWnd, int wBar, bool bShow);
++
++	internal static bool ShowScrollBar(IntPtr hWnd, int wBar, bool bShow)
++	{
++		if (!Win32)
++		{
++			return false;
++		}
++		return ShowScrollBar_Native(hWnd, wBar, bShow);
++	}
++
++	[DllImport("user32.dll", EntryPoint = "GetAsyncKeyState")]
++	private static extern short GetAsyncKeyState_Native(Keys vKey);
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern short GetAsyncKeyState(Keys vKey);
++	internal static short GetAsyncKeyState(Keys vKey)
++	{
++		if (!Win32)
++		{
++			return default(short);
++		}
++		return GetAsyncKeyState_Native(vKey);
++	}
+ 
+-	[DllImport("user32.dll", SetLastError = true)]
++	[DllImport("user32.dll", SetLastError = true, EntryPoint = "PostMessage")]
+ 	[return: MarshalAs(UnmanagedType.Bool)]
+-	internal static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wp, IntPtr lp);
++	private static extern bool PostMessage_Native(IntPtr hWnd, int msg, IntPtr wp, IntPtr lp);
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Auto, ExactSpelling = true)]
+-	internal static extern IntPtr GetForegroundWindow();
++	internal static bool PostMessage(IntPtr hWnd, int msg, IntPtr wp, IntPtr lp)
++	{
++		if (hWnd == DosboxApi.PseudoWindow)
++		{
++			return BiosKeyboard.Post(msg, wp, lp);
++		}
++		if (!Win32)
++		{
++			return false;
++		}
++		return PostMessage_Native(hWnd, msg, wp, lp);
++	}
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+-	internal static extern uint GetWindowThreadProcessId(IntPtr handle, out int processId);
++	[DllImport("user32.dll", CharSet = CharSet.Auto, ExactSpelling = true, EntryPoint = "GetForegroundWindow")]
++	private static extern IntPtr GetForegroundWindow_Native();
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern uint SendInput(uint nInputs, [In][MarshalAs(UnmanagedType.LPArray)] INPUT[] pInputs, int cbSize);
++	internal static IntPtr GetForegroundWindow()
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return GetForegroundWindow_Native();
++	}
++
++	[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true, EntryPoint = "GetWindowThreadProcessId")]
++	private static extern uint GetWindowThreadProcessId_Native(IntPtr handle, out int processId);
++
++	internal static uint GetWindowThreadProcessId(IntPtr handle, out int processId)
++	{
++		if (!Win32)
++		{
++			processId = default;
++			return default(uint);
++		}
++		return GetWindowThreadProcessId_Native(handle, out processId);
++	}
++
++	[DllImport("user32.dll", EntryPoint = "SendInput")]
++	private static extern uint SendInput_Native(uint nInputs, [In][MarshalAs(UnmanagedType.LPArray)] INPUT[] pInputs, int cbSize);
++
++	internal static uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize)
++	{
++		if (!Win32)
++		{
++			return default(uint);
++		}
++		return SendInput_Native(nInputs, pInputs, cbSize);
++	}
+ 
+ 	public static uint ExtendedKey(Keys key)
+ 	{
+@@ -645,12 +707,26 @@ public static class NativeMethods
+ 		return processId == Process.GetCurrentProcess().Id;
+ 	}
+ 
+-	[DllImport("kernel32.dll", SetLastError = true)]
++	[DllImport("kernel32.dll", SetLastError = true, EntryPoint = "IsWow64Process")]
+ 	[return: MarshalAs(UnmanagedType.Bool)]
+-	internal static extern bool IsWow64Process([In] IntPtr processHandle, [MarshalAs(UnmanagedType.Bool)] out bool wow64Process);
++	private static extern bool IsWow64Process_Native([In] IntPtr processHandle, [MarshalAs(UnmanagedType.Bool)] out bool wow64Process);
++
++	internal static bool IsWow64Process(IntPtr processHandle, out bool wow64Process)
++	{
++		if (!Win32)
++		{
++			wow64Process = default;
++			return false;
++		}
++		return IsWow64Process_Native(processHandle, out wow64Process);
++	}
+ 
+ 	public static bool Is64Bit(IntPtr hProcess)
+ 	{
++		if (hProcess == DosboxApi.ProcessHandle)
++		{
++			return Environment.Is64BitProcess;
++		}
+ 		bool wow64Process = false;
+ 		if (IsWow64Process(hProcess, out wow64Process))
+ 		{
+@@ -674,8 +750,17 @@ public static class NativeMethods
+ 		return Rectangle.Empty;
+ 	}
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern bool SetKeyboardState(byte[] lpKeyState);
++	[DllImport("user32.dll", EntryPoint = "SetKeyboardState")]
++	private static extern bool SetKeyboardState_Native(byte[] lpKeyState);
++
++	internal static bool SetKeyboardState(byte[] lpKeyState)
++	{
++		if (!Win32)
++		{
++			return false;
++		}
++		return SetKeyboardState_Native(lpKeyState);
++	}
+ 
+ 	public static Keys GetModifiers()
+ 	{
+@@ -733,9 +818,18 @@ public static class NativeMethods
+ 		return true;
+ 	}
+ 
+-	[DllImport("user32.dll")]
++	[DllImport("user32.dll", EntryPoint = "GetKeyboardState")]
+ 	[return: MarshalAs(UnmanagedType.Bool)]
+-	internal static extern bool GetKeyboardState(byte[] lpKeyState);
++	private static extern bool GetKeyboardState_Native(byte[] lpKeyState);
++
++	internal static bool GetKeyboardState(byte[] lpKeyState)
++	{
++		if (!Win32)
++		{
++			return false;
++		}
++		return GetKeyboardState_Native(lpKeyState);
++	}
+ 
+ 	public static void VerifyKeyboardState(bool[] lpKeyState)
+ 	{
+@@ -760,9 +854,19 @@ public static class NativeMethods
+ 		}
+ 	}
+ 
+-	[DllImport("user32.dll")]
++	[DllImport("user32.dll", EntryPoint = "GetWindowRect")]
+ 	[return: MarshalAs(UnmanagedType.Bool)]
+-	internal static extern bool GetWindowRect(HandleRef hwnd, out RECT lpRect);
++	private static extern bool GetWindowRect_Native(HandleRef hwnd, out RECT lpRect);
++
++	internal static bool GetWindowRect(HandleRef hwnd, out RECT lpRect)
++	{
++		if (!Win32)
++		{
++			lpRect = default;
++			return false;
++		}
++		return GetWindowRect_Native(hwnd, out lpRect);
++	}
+ 
+ 	public static Rectangle GetWindowRect(IntPtr hwnd)
+ 	{
+@@ -770,18 +874,54 @@ public static class NativeMethods
+ 		return new Rectangle(lpRect.Left, lpRect.Top, lpRect.Right - lpRect.Left, lpRect.Bottom - lpRect.Top);
+ 	}
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+-	internal static extern bool SetWindowText(IntPtr hwnd, string lpString);
++	[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "SetWindowText")]
++	private static extern bool SetWindowText_Native(IntPtr hwnd, string lpString);
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+-	internal static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
++	internal static bool SetWindowText(IntPtr hwnd, string lpString)
++	{
++		if (!Win32)
++		{
++			return false;
++		}
++		return SetWindowText_Native(hwnd, lpString);
++	}
++
++	[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "FindWindow")]
++	private static extern IntPtr FindWindow_Native(string lpClassName, string lpWindowName);
++
++	internal static IntPtr FindWindow(string lpClassName, string lpWindowName)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return FindWindow_Native(lpClassName, lpWindowName);
++	}
+ 
+ 	[DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "FindWindow", SetLastError = true)]
+-	internal static extern IntPtr FindWindowByCaption(IntPtr ZeroOnly, string lpWindowName);
++	private static extern IntPtr FindWindowByCaption_Native(IntPtr ZeroOnly, string lpWindowName);
+ 
+-	[DllImport("user32.dll")]
++	internal static IntPtr FindWindowByCaption(IntPtr ZeroOnly, string lpWindowName)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return FindWindowByCaption_Native(ZeroOnly, lpWindowName);
++	}
++
++	[DllImport("user32.dll", EntryPoint = "SetWindowPos")]
+ 	[return: MarshalAs(UnmanagedType.Bool)]
+-	internal static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, SetWindowPosFlags uFlags);
++	private static extern bool SetWindowPos_Native(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, SetWindowPosFlags uFlags);
++
++	internal static bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, SetWindowPosFlags uFlags)
++	{
++		if (!Win32)
++		{
++			return false;
++		}
++		return SetWindowPos_Native(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags);
++	}
+ 
+ 	private static void SetWindowPosThread(object oInfo)
+ 	{
+@@ -816,8 +956,17 @@ public static class NativeMethods
+ 		return true;
+ 	}
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Auto)]
+-	internal static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
++	[DllImport("user32.dll", CharSet = CharSet.Auto, EntryPoint = "SendMessage")]
++	private static extern IntPtr SendMessage_Native(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
++
++	internal static IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return SendMessage_Native(hWnd, msg, wParam, lParam);
++	}
+ 
+ 	public static void SetTooltipDelay(ListView lv, int showTime)
+ 	{
+@@ -828,24 +977,68 @@ public static class NativeMethods
+ 		}
+ 	}
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+-	internal static extern short VkKeyScan(char ch);
++	[DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "VkKeyScan")]
++	private static extern short VkKeyScan_Native(char ch);
++
++	internal static short VkKeyScan(char ch)
++	{
++		if (!Win32)
++		{
++			return default(short);
++		}
++		return VkKeyScan_Native(ch);
++	}
+ 
+ 	public static IntPtr MakeLParam(ushort l, ushort h)
+ 	{
+ 		return new IntPtr((h << 16) | l);
+ 	}
+ 
+-	[DllImport("user32.dll")]
++	[DllImport("user32.dll", EntryPoint = "IsWindow")]
+ 	[return: MarshalAs(UnmanagedType.Bool)]
+-	internal static extern bool IsWindow(IntPtr hWnd);
++	private static extern bool IsWindow_Native(IntPtr hWnd);
++
++	internal static bool IsWindow(IntPtr hWnd)
++	{
++		if (hWnd == DosboxApi.PseudoWindow)
++		{
++			return DosboxApi.IsAlive;
++		}
++		if (!Win32)
++		{
++			return false;
++		}
++		return IsWindow_Native(hWnd);
++	}
+ 
+-	[DllImport("user32.dll")]
++	[DllImport("user32.dll", EntryPoint = "SetForegroundWindow")]
+ 	[return: MarshalAs(UnmanagedType.Bool)]
+-	internal static extern bool SetForegroundWindow(IntPtr hWnd);
++	private static extern bool SetForegroundWindow_Native(IntPtr hWnd);
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
++	internal static bool SetForegroundWindow(IntPtr hWnd)
++	{
++		if (hWnd == DosboxApi.PseudoWindow)
++		{
++			return true;
++		}
++		if (!Win32)
++		{
++			return false;
++		}
++		return SetForegroundWindow_Native(hWnd);
++	}
++
++	[DllImport("user32.dll", EntryPoint = "AttachThreadInput")]
++	private static extern bool AttachThreadInput_Native(uint idAttach, uint idAttachTo, bool fAttach);
++
++	internal static bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach)
++	{
++		if (!Win32)
++		{
++			return false;
++		}
++		return AttachThreadInput_Native(idAttach, idAttachTo, fAttach);
++	}
+ 
+ 	public static void AttachThreadInputToCurrentProcess(IntPtr window)
+ 	{
+@@ -863,24 +1056,90 @@ public static class NativeMethods
+ 		AttachThreadInput(windowThreadProcessId, windowThreadProcessId2, fAttach: false);
+ 	}
+ 
+-	[DllImport("user32.dll", SetLastError = true)]
++	[DllImport("user32.dll", SetLastError = true, EntryPoint = "GetWindowPlacement")]
+ 	[return: MarshalAs(UnmanagedType.Bool)]
+-	internal static extern bool GetWindowPlacement(IntPtr hWnd, out WINDOWPLACEMENT lpwndpl);
++	private static extern bool GetWindowPlacement_Native(IntPtr hWnd, out WINDOWPLACEMENT lpwndpl);
++
++	internal static bool GetWindowPlacement(IntPtr hWnd, out WINDOWPLACEMENT lpwndpl)
++	{
++		if (!Win32)
++		{
++			lpwndpl = default;
++			return false;
++		}
++		return GetWindowPlacement_Native(hWnd, out lpwndpl);
++	}
++
++	[DllImport("user32.dll", SetLastError = true, EntryPoint = "GetWindow")]
++	private static extern IntPtr GetWindow_Native(IntPtr hWnd, GetWindow_Cmd uCmd);
++
++	internal static IntPtr GetWindow(IntPtr hWnd, GetWindow_Cmd uCmd)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return GetWindow_Native(hWnd, uCmd);
++	}
++
++	[DllImport("user32.dll", EntryPoint = "GetTopWindow")]
++	private static extern IntPtr GetTopWindow_Native(IntPtr hWnd);
++
++	internal static IntPtr GetTopWindow(IntPtr hWnd)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return GetTopWindow_Native(hWnd);
++	}
++
++	[DllImport("user32.dll", EntryPoint = "GetActiveWindow")]
++	private static extern IntPtr GetActiveWindow_Native();
+ 
+-	[DllImport("user32.dll", SetLastError = true)]
+-	internal static extern IntPtr GetWindow(IntPtr hWnd, GetWindow_Cmd uCmd);
++	internal static IntPtr GetActiveWindow()
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return GetActiveWindow_Native();
++	}
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern IntPtr GetTopWindow(IntPtr hWnd);
++	[DllImport("kernel32.dll", EntryPoint = "OpenProcess")]
++	private static extern IntPtr OpenProcessNative(uint dwDesiredAccess, int bInheritHandle, uint dwProcessId);
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern IntPtr GetActiveWindow();
++	[DllImport("kernel32.dll", EntryPoint = "CloseHandle")]
++	private static extern int CloseHandleNative(IntPtr hObject);
+ 
+-	[DllImport("kernel32.dll")]
+-	internal static extern IntPtr OpenProcess(uint dwDesiredAccess, int bInheritHandle, uint dwProcessId);
++	internal static IntPtr OpenProcess(uint dwDesiredAccess, int bInheritHandle, uint dwProcessId)
++	{
++		if (dwProcessId == DosboxApi.PseudoPid)
++		{
++			return DosboxApi.ProcessHandle;
++		}
++		return OpenProcessNative(dwDesiredAccess, bInheritHandle, dwProcessId);
++	}
+ 
+-	[DllImport("kernel32.dll")]
+-	internal static extern int CloseHandle(IntPtr hObject);
++	internal static int CloseHandle(IntPtr hObject)
++	{
++		if (hObject == DosboxApi.ProcessHandle)
++		{
++			return 1;
++		}
++		return CloseHandleNative(hObject);
++	}
++
++	/// <summary>Guest linear address for an address in the pseudo DOSBox process, or -1 outside its RAM region.</summary>
++	private static long ApiLinear(ulong address, ulong size)
++	{
++		ulong start = DosboxApi.VirtualBase + DosboxApi.BlockHeader;
++		if (address < start || address + size > DosboxApi.VirtualBase + DosboxApi.RegionSize)
++		{
++			return -1L;
++		}
++		return (long)(address - start);
++	}
+ 
+ 	[DllImport("kernel32.dll", EntryPoint = "ReadProcessMemory")]
+ 	private static extern bool ReadProcessMemory32(IntPtr hProcess, UIntPtr lpBaseAddress, [In][Out] byte[] buffer, UIntPtr size, out uint lpNumberOfBytesRead);
+@@ -890,6 +1149,32 @@ public static class NativeMethods
+ 
+ 	public static bool ReadProcessMemory(IntPtr hProcess, ulong lpBaseAddress, [In][Out] byte[] buffer, ulong size, out long lpNumberOfBytesRead)
+ 	{
++		if (hProcess == DosboxApi.ProcessHandle)
++		{
++			lpNumberOfBytesRead = 0L;
++			if (size > (ulong)buffer.Length)
++			{
++				return false;
++			}
++			// The region's first bytes stand for DOSBox 0.74's heap block header: readable, zero here.
++			ulong start = DosboxApi.VirtualBase + DosboxApi.BlockHeader;
++			int header = 0;
++			if (lpBaseAddress >= DosboxApi.VirtualBase && lpBaseAddress < start)
++			{
++				header = (int)Math.Min(size, start - lpBaseAddress);
++				Array.Clear(buffer, 0, header);
++			}
++			if ((ulong)header < size)
++			{
++				long linear = ApiLinear(lpBaseAddress + (ulong)header, size - (ulong)header);
++				if (linear < 0 || !DosboxApi.Read(linear, buffer, header, (int)size - header))
++				{
++					return false;
++				}
++			}
++			lpNumberOfBytesRead = (long)size;
++			return true;
++		}
+ 		if (Environment.Is64BitProcess)
+ 		{
+ 			return ReadProcessMemory64(hProcess, new UIntPtr(lpBaseAddress), buffer, new UIntPtr(size), out lpNumberOfBytesRead);
+@@ -913,6 +1198,17 @@ public static class NativeMethods
+ 
+ 	public static bool WriteProcessMemory(IntPtr hProcess, ulong lpBaseAddress, [In][Out] byte[] buffer, ulong size, out long lpNumberOfBytesWritten)
+ 	{
++		if (hProcess == DosboxApi.ProcessHandle)
++		{
++			lpNumberOfBytesWritten = 0L;
++			long linear = ApiLinear(lpBaseAddress, size);
++			if (linear < 0 || size > (ulong)buffer.Length || !DosboxApi.Write(linear, buffer, 0, (int)size))
++			{
++				return false;
++			}
++			lpNumberOfBytesWritten = (long)size;
++			return true;
++		}
+ 		if (Environment.Is64BitProcess)
+ 		{
+ 			return WriteProcessMemory64(hProcess, new UIntPtr(lpBaseAddress), buffer, new UIntPtr(size), out lpNumberOfBytesWritten);
+@@ -928,14 +1224,58 @@ public static class NativeMethods
+ 		return result;
+ 	}
+ 
+-	[DllImport("kernel32.dll")]
+-	internal static extern IntPtr VirtualQueryEx(IntPtr hProcess, UIntPtr lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, UIntPtr dwLength);
++	[DllImport("kernel32.dll", EntryPoint = "VirtualQueryEx")]
++	private static extern IntPtr VirtualQueryEx_Native(IntPtr hProcess, UIntPtr lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, UIntPtr dwLength);
++
++	internal static IntPtr VirtualQueryEx(IntPtr hProcess, UIntPtr lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, UIntPtr dwLength)
++	{
++		if (!Win32)
++		{
++			lpBuffer = default;
++			return IntPtr.Zero;
++		}
++		return VirtualQueryEx_Native(hProcess, lpAddress, out lpBuffer, dwLength);
++	}
+ 
+ 	[DllImport("kernel32.dll", EntryPoint = "VirtualQueryEx")]
+-	internal static extern IntPtr VirtualQueryEx64(IntPtr hProcess, UIntPtr lpAddress, out MEMORY_BASIC_INFORMATION64 lpBuffer, UIntPtr dwLength);
++	private static extern IntPtr VirtualQueryEx64_Native(IntPtr hProcess, UIntPtr lpAddress, out MEMORY_BASIC_INFORMATION64 lpBuffer, UIntPtr dwLength);
++
++	internal static IntPtr VirtualQueryEx64(IntPtr hProcess, UIntPtr lpAddress, out MEMORY_BASIC_INFORMATION64 lpBuffer, UIntPtr dwLength)
++	{
++		if (!Win32)
++		{
++			lpBuffer = default;
++			return IntPtr.Zero;
++		}
++		return VirtualQueryEx64_Native(hProcess, lpAddress, out lpBuffer, dwLength);
++	}
+ 
+ 	public static int QueryMemory(IntPtr hProcess, ulong lpAddress, out MEMORY_BASIC_INFORMATION64 lpBuffer, uint dwLength)
+ 	{
++		if (hProcess == DosboxApi.ProcessHandle)
++		{
++			// The pseudo process: free space, then one committed region holding the emulated RAM, then nothing.
++			lpBuffer = default(MEMORY_BASIC_INFORMATION64);
++			ulong end = DosboxApi.VirtualBase + DosboxApi.RegionSize;
++			if (lpAddress >= end || DosboxApi.RamSize <= 0)
++			{
++				return 0;
++			}
++			if (lpAddress < DosboxApi.VirtualBase)
++			{
++				lpBuffer.BaseAddress = 0L;
++				lpBuffer.RegionSize = (long)DosboxApi.VirtualBase;
++				lpBuffer.State = MemoryState.MEM_FREE;
++			}
++			else
++			{
++				lpBuffer.BaseAddress = (long)DosboxApi.VirtualBase;
++				lpBuffer.AllocationBase = (long)DosboxApi.VirtualBase;
++				lpBuffer.RegionSize = (long)DosboxApi.RegionSize;
++				lpBuffer.State = MemoryState.MEM_COMMIT;
++			}
++			return Marshal.SizeOf(typeof(MEMORY_BASIC_INFORMATION64));
++		}
+ 		int num = -1;
+ 		if (Is64Bit(hProcess) && Environment.Is64BitProcess)
+ 		{
+@@ -960,22 +1300,62 @@ public static class NativeMethods
+ 		return num;
+ 	}
+ 
+-	[DllImport("user32.dll")]
++	[DllImport("user32.dll", EntryPoint = "EnumChildWindows")]
+ 	[return: MarshalAs(UnmanagedType.Bool)]
+-	internal static extern bool EnumChildWindows(IntPtr hwndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
++	private static extern bool EnumChildWindows_Native(IntPtr hwndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+ 
+-	[DllImport("user32.dll")]
++	internal static bool EnumChildWindows(IntPtr hwndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam)
++	{
++		if (!Win32)
++		{
++			return false;
++		}
++		return EnumChildWindows_Native(hwndParent, lpEnumFunc, lParam);
++	}
++
++	[DllImport("user32.dll", EntryPoint = "EnumWindows")]
+ 	[return: MarshalAs(UnmanagedType.Bool)]
+-	internal static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
++	private static extern bool EnumWindows_Native(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+-	internal static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
++	internal static bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam)
++	{
++		if (!Win32)
++		{
++			return false;
++		}
++		return EnumWindows_Native(lpEnumFunc, lParam);
++	}
++
++	[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "GetWindowText")]
++	private static extern int GetWindowText_Native(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+-	internal static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
++	internal static int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount)
++	{
++		if (!Win32)
++		{
++			return default(int);
++		}
++		return GetWindowText_Native(hWnd, lpString, nMaxCount);
++	}
++
++	[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "GetClassName")]
++	private static extern int GetClassName_Native(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
++
++	internal static int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount)
++	{
++		if (!Win32)
++		{
++			return default(int);
++		}
++		return GetClassName_Native(hWnd, lpClassName, nMaxCount);
++	}
+ 
+ 	public static string GetWindowText(IntPtr hWnd)
+ 	{
++		if (DosboxWindow.IsDosbox(hWnd))
++		{
++			return DosboxApi.WindowTitle;
++		}
+ 		StringBuilder stringBuilder = new StringBuilder(512);
+ 		GetWindowText(hWnd, stringBuilder, 512);
+ 		return stringBuilder.ToString();
+@@ -1003,8 +1383,17 @@ public static class NativeMethods
+ 		SendMessage(parent.Handle, 11, (IntPtr)1, IntPtr.Zero);
+ 	}
+ 
+-	[DllImport("user32.dll")]
+-	private static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, RedrawWindowFlags flags);
++	[DllImport("user32.dll", EntryPoint = "RedrawWindow")]
++	private static extern bool RedrawWindow_Native(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, RedrawWindowFlags flags);
++
++	internal static bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, RedrawWindowFlags flags)
++	{
++		if (!Win32)
++		{
++			return false;
++		}
++		return RedrawWindow_Native(hWnd, lprcUpdate, hrgnUpdate, flags);
++	}
+ 
+ 	public static void ResumeDrawing(IntPtr hWnd, bool bRedraw = true)
+ 	{
+@@ -1012,32 +1401,99 @@ public static class NativeMethods
+ 		RedrawWindow(hWnd, IntPtr.Zero, IntPtr.Zero, RedrawWindowFlags.Invalidate | RedrawWindowFlags.Erase | RedrawWindowFlags.AllChildren | RedrawWindowFlags.Frame);
+ 	}
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern IntPtr BeginDeferWindowPos(int nNumWindows);
++	[DllImport("user32.dll", EntryPoint = "BeginDeferWindowPos")]
++	private static extern IntPtr BeginDeferWindowPos_Native(int nNumWindows);
++
++	internal static IntPtr BeginDeferWindowPos(int nNumWindows)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return BeginDeferWindowPos_Native(nNumWindows);
++	}
++
++	[DllImport("user32.dll", EntryPoint = "DeferWindowPos")]
++	private static extern IntPtr DeferWindowPos_Native(IntPtr hWinPosInfo, IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, [MarshalAs(UnmanagedType.U4)] DeferWindowPosCommands uFlags);
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern IntPtr DeferWindowPos(IntPtr hWinPosInfo, IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, [MarshalAs(UnmanagedType.U4)] DeferWindowPosCommands uFlags);
++	internal static IntPtr DeferWindowPos(IntPtr hWinPosInfo, IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, DeferWindowPosCommands uFlags)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return DeferWindowPos_Native(hWinPosInfo, hWnd, hWndInsertAfter, x, y, cx, cy, uFlags);
++	}
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern bool EndDeferWindowPos(IntPtr hWinPosInfo);
++	[DllImport("user32.dll", EntryPoint = "EndDeferWindowPos")]
++	private static extern bool EndDeferWindowPos_Native(IntPtr hWinPosInfo);
+ 
+-	[DllImport("user32.dll")]
++	internal static bool EndDeferWindowPos(IntPtr hWinPosInfo)
++	{
++		if (!Win32)
++		{
++			return false;
++		}
++		return EndDeferWindowPos_Native(hWinPosInfo);
++	}
++
++	[DllImport("user32.dll", EntryPoint = "IsWindowVisible")]
+ 	[return: MarshalAs(UnmanagedType.Bool)]
+-	internal static extern bool IsWindowVisible(IntPtr hWnd);
++	private static extern bool IsWindowVisible_Native(IntPtr hWnd);
+ 
+-	[DllImport("user32.dll", SetLastError = true)]
+-	internal static extern int GetWindowLong(IntPtr hWnd, int nIndex);
++	internal static bool IsWindowVisible(IntPtr hWnd)
++	{
++		if (hWnd == DosboxApi.PseudoWindow)
++		{
++			return DosboxApi.IsAlive;
++		}
++		if (!Win32)
++		{
++			return false;
++		}
++		return IsWindowVisible_Native(hWnd);
++	}
++
++	[DllImport("user32.dll", SetLastError = true, EntryPoint = "GetWindowLong")]
++	private static extern int GetWindowLong_Native(IntPtr hWnd, int nIndex);
++
++	internal static int GetWindowLong(IntPtr hWnd, int nIndex)
++	{
++		if (!Win32)
++		{
++			return default(int);
++		}
++		return GetWindowLong_Native(hWnd, nIndex);
++	}
+ 
+ 	public static bool IsWindowTopmost(IntPtr hWnd)
+ 	{
+ 		return ((ulong)GetWindowLong(hWnd, -20) & 8uL) != 0;
+ 	}
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Auto)]
+-	internal static extern int GetScrollPos(IntPtr hWnd, int nBar);
++	[DllImport("user32.dll", CharSet = CharSet.Auto, EntryPoint = "GetScrollPos")]
++	private static extern int GetScrollPos_Native(IntPtr hWnd, int nBar);
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern int SetScrollPos(IntPtr hWnd, int nBar, int nPos, bool bRedraw);
++	internal static int GetScrollPos(IntPtr hWnd, int nBar)
++	{
++		if (!Win32)
++		{
++			return default(int);
++		}
++		return GetScrollPos_Native(hWnd, nBar);
++	}
++
++	[DllImport("user32.dll", EntryPoint = "SetScrollPos")]
++	private static extern int SetScrollPos_Native(IntPtr hWnd, int nBar, int nPos, bool bRedraw);
++
++	internal static int SetScrollPos(IntPtr hWnd, int nBar, int nPos, bool bRedraw)
++	{
++		if (!Win32)
++		{
++			return default(int);
++		}
++		return SetScrollPos_Native(hWnd, nBar, nPos, bRedraw);
++	}
+ 
+ 	public static bool IsMinimized(IntPtr hWnd)
+ 	{
+@@ -1049,11 +1505,29 @@ public static class NativeMethods
+ 		return false;
+ 	}
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
++	[DllImport("user32.dll", EntryPoint = "SetWindowLong")]
++	private static extern int SetWindowLong_Native(IntPtr hWnd, int nIndex, int dwNewLong);
+ 
+-	[DllImport("user32.dll", SetLastError = true)]
+-	internal static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
++	internal static int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong)
++	{
++		if (!Win32)
++		{
++			return default(int);
++		}
++		return SetWindowLong_Native(hWnd, nIndex, dwNewLong);
++	}
++
++	[DllImport("user32.dll", SetLastError = true, EntryPoint = "SetParent")]
++	private static extern IntPtr SetParent_Native(IntPtr hWndChild, IntPtr hWndNewParent);
++
++	internal static IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return SetParent_Native(hWndChild, hWndNewParent);
++	}
+ 
+ 	public static void SetShowInTaskbar(IntPtr hWndMain, IntPtr hWnd, bool bShow)
+ 	{
+@@ -1078,20 +1552,69 @@ public static class NativeMethods
+ 		SetWindowLong(hWnd, -20, windowLong);
+ 	}
+ 
+-	[DllImport("dwmapi.dll")]
+-	internal static extern int DwmGetWindowAttribute(IntPtr hwnd, DWMWINDOWATTRIBUTE dwAttribute, out RECT pvAttribute, int cbAttribute);
++	[DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
++	private static extern int DwmGetWindowAttribute_Native(IntPtr hwnd, DWMWINDOWATTRIBUTE dwAttribute, out RECT pvAttribute, int cbAttribute);
++
++	internal static int DwmGetWindowAttribute(IntPtr hwnd, DWMWINDOWATTRIBUTE dwAttribute, out RECT pvAttribute, int cbAttribute)
++	{
++		if (!Win32)
++		{
++			// No DWM: fail (E_NOTIMPL), so callers use GetWindowRect instead of scaling an empty frame by 0
++			pvAttribute = default;
++			return unchecked((int)0x80004001);
++		}
++		return DwmGetWindowAttribute_Native(hwnd, dwAttribute, out pvAttribute, cbAttribute);
++	}
++
++	[DllImport("dwmapi.dll", EntryPoint = "DwmSetWindowAttribute")]
++	private static extern int DwmSetWindowAttribute_Native(IntPtr hwnd, DWMWINDOWATTRIBUTE dwAttribute, ref RECT pvAttribute, int cbAttribute);
+ 
+-	[DllImport("dwmapi.dll")]
+-	internal static extern int DwmSetWindowAttribute(IntPtr hwnd, DWMWINDOWATTRIBUTE dwAttribute, ref RECT pvAttribute, int cbAttribute);
++	internal static int DwmSetWindowAttribute(IntPtr hwnd, DWMWINDOWATTRIBUTE dwAttribute, ref RECT pvAttribute, int cbAttribute)
++	{
++		if (!Win32)
++		{
++			return default(int);
++		}
++		return DwmSetWindowAttribute_Native(hwnd, dwAttribute, ref pvAttribute, cbAttribute);
++	}
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
++	[DllImport("user32.dll", EntryPoint = "GetClientRect")]
++	private static extern bool GetClientRect_Native(IntPtr hWnd, out RECT lpRect);
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
++	internal static bool GetClientRect(IntPtr hWnd, out RECT lpRect)
++	{
++		if (!Win32)
++		{
++			lpRect = default;
++			return false;
++		}
++		return GetClientRect_Native(hWnd, out lpRect);
++	}
++
++	[DllImport("user32.dll", EntryPoint = "MonitorFromWindow")]
++	private static extern IntPtr MonitorFromWindow_Native(IntPtr hwnd, uint dwFlags);
++
++	internal static IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return MonitorFromWindow_Native(hwnd, dwFlags);
++	}
+ 
+-	[DllImport("Shcore.dll")]
+-	internal static extern int GetScaleFactorForMonitor(IntPtr hMon, out DEVICE_SCALE_FACTOR pScale);
++	[DllImport("Shcore.dll", EntryPoint = "GetScaleFactorForMonitor")]
++	private static extern int GetScaleFactorForMonitor_Native(IntPtr hMon, out DEVICE_SCALE_FACTOR pScale);
++
++	internal static int GetScaleFactorForMonitor(IntPtr hMon, out DEVICE_SCALE_FACTOR pScale)
++	{
++		if (!Win32)
++		{
++			pScale = (DEVICE_SCALE_FACTOR)100;
++			return default(int);
++		}
++		return GetScaleFactorForMonitor_Native(hMon, out pScale);
++	}
+ 
+ 	public static Rectangle GetClientRect(IntPtr hWnd)
+ 	{
+@@ -1164,12 +1687,30 @@ public static class NativeMethods
+ 		}
+ 	}
+ 
+-	[DllImport("user32.dll")]
++	[DllImport("user32.dll", EntryPoint = "GetIconInfo")]
+ 	[return: MarshalAs(UnmanagedType.Bool)]
+-	internal static extern bool GetIconInfo(IntPtr hIcon, ref IconInfo pIconInfo);
++	private static extern bool GetIconInfo_Native(IntPtr hIcon, ref IconInfo pIconInfo);
++
++	internal static bool GetIconInfo(IntPtr hIcon, ref IconInfo pIconInfo)
++	{
++		if (!Win32)
++		{
++			return false;
++		}
++		return GetIconInfo_Native(hIcon, ref pIconInfo);
++	}
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern IntPtr CreateIconIndirect(ref IconInfo icon);
++	[DllImport("user32.dll", EntryPoint = "CreateIconIndirect")]
++	private static extern IntPtr CreateIconIndirect_Native(ref IconInfo icon);
++
++	internal static IntPtr CreateIconIndirect(ref IconInfo icon)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return CreateIconIndirect_Native(ref icon);
++	}
+ 
+ 	public static Cursor CreateCursor(Icon icon, int xHotSpot, int yHotSpot)
+ 	{
+@@ -1181,11 +1722,29 @@ public static class NativeMethods
+ 		return new Cursor(CreateIconIndirect(ref pIconInfo));
+ 	}
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Auto, ExactSpelling = true)]
+-	internal static extern IntPtr GetParent(IntPtr hWnd);
++	[DllImport("user32.dll", CharSet = CharSet.Auto, ExactSpelling = true, EntryPoint = "GetParent")]
++	private static extern IntPtr GetParent_Native(IntPtr hWnd);
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern IntPtr WindowFromPoint(POINT Point);
++	internal static IntPtr GetParent(IntPtr hWnd)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return GetParent_Native(hWnd);
++	}
++
++	[DllImport("user32.dll", EntryPoint = "WindowFromPoint")]
++	private static extern IntPtr WindowFromPoint_Native(POINT Point);
++
++	internal static IntPtr WindowFromPoint(POINT Point)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return WindowFromPoint_Native(Point);
++	}
+ 
+ 	public static IntPtr WindowAtPoint(Point pt)
+ 	{
+@@ -1524,25 +2083,97 @@ public static class NativeMethods
+ 		PostMessage(hWnd, 274, (IntPtr)61728, IntPtr.Zero);
+ 	}
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+-	internal static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
++	[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true, EntryPoint = "SetWindowsHookEx")]
++	private static extern IntPtr SetWindowsHookEx_Native(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+-	internal static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
++	internal static IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return SetWindowsHookEx_Native(idHook, lpfn, hMod, dwThreadId);
++	}
++
++	[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true, EntryPoint = "CallNextHookEx")]
++	private static extern IntPtr CallNextHookEx_Native(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
++
++	internal static IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return CallNextHookEx_Native(hhk, nCode, wParam, lParam);
++	}
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
++	[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true, EntryPoint = "UnhookWindowsHookEx")]
+ 	[return: MarshalAs(UnmanagedType.Bool)]
+-	internal static extern bool UnhookWindowsHookEx(IntPtr hhk);
++	private static extern bool UnhookWindowsHookEx_Native(IntPtr hhk);
++
++	internal static bool UnhookWindowsHookEx(IntPtr hhk)
++	{
++		if (!Win32)
++		{
++			return false;
++		}
++		return UnhookWindowsHookEx_Native(hhk);
++	}
++
++	[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "GetModuleHandle")]
++	private static extern IntPtr GetModuleHandle_Native(string lpModuleName);
++
++	internal static IntPtr GetModuleHandle(string lpModuleName)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return GetModuleHandle_Native(lpModuleName);
++	}
+ 
+-	[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+-	internal static extern IntPtr GetModuleHandle(string lpModuleName);
++	[DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "LoadLibrary")]
++	private static extern IntPtr LoadLibrary_Native(string lpFileName);
+ 
+-	[DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+-	internal static extern IntPtr LoadLibrary(string lpFileName);
++	internal static IntPtr LoadLibrary(string lpFileName)
++	{
++		if (!Win32)
++		{
++			return IntPtr.Zero;
++		}
++		return LoadLibrary_Native(lpFileName);
++	}
++
++	[DllImport("msvcrt.dll", CallingConvention = CallingConvention.Cdecl, EntryPoint = "memcmp")]
++	private static extern int memcmp_Native(byte[] b1, byte[] b2, long count);
++
++	internal static int memcmp(byte[] b1, byte[] b2, long count)
++	{
++		if (!Win32)
++		{
++			// No msvcrt: compare here (a stub's 0 made every Global.Compare succeed)
++			for (long i = 0; i < count; i++)
++			{
++				int difference = b1[i] - b2[i];
++				if (difference != 0)
++				{
++					return difference;
++				}
++			}
++			return 0;
++		}
++		return memcmp_Native(b1, b2, count);
++	}
+ 
+-	[DllImport("msvcrt.dll", CallingConvention = CallingConvention.Cdecl)]
+-	internal static extern int memcmp(byte[] b1, byte[] b2, long count);
++	[DllImport("user32.dll", EntryPoint = "GetSystemMetrics")]
++	private static extern int GetSystemMetrics_Native(SystemMetric smIndex);
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern int GetSystemMetrics(SystemMetric smIndex);
++	internal static int GetSystemMetrics(SystemMetric smIndex)
++	{
++		if (!Win32)
++		{
++			return default(int);
++		}
++		return GetSystemMetrics_Native(smIndex);
++	}
+ }
+diff --git a/WhereAreWe/OptionsForm.cs b/WhereAreWe/OptionsForm.cs
+index 7aaa23972e53fcf030d20560445e89a74cb9d250..d906fcaafe0d5e17999890e6977eeaddc964f4f5 100644
+--- a/WhereAreWe/OptionsForm.cs
++++ b/WhereAreWe/OptionsForm.cs
+@@ -340,6 +340,10 @@ public class OptionsForm : HackerBasedForm, IKeyboardHookCallback, IScalableSize
+ 
+ 	private ScalableCheckBox cbQuickScanDOSBox;
+ 
++	private ScalableLabel labelDosboxApi;
++
++	private ScalableTextBox tbDosboxApi;
++
+ 	private ScalableLabel label32;
+ 
+ 	private ScalableListView lvGameTitles;
+@@ -834,6 +838,11 @@ public class OptionsForm : HackerBasedForm, IKeyboardHookCallback, IScalableSize
+ 		Settings.Default.OfferToSwitchBooks = cbOfferSwitch.Checked;
+ 		SaveGameTitles(lvGameTitles);
+ 		Settings.Default.QuickScanDOSBox = cbQuickScanDOSBox.Checked;
++		if (Settings.Default.DOSBoxApiAddress != tbDosboxApi.Text.Trim())
++		{
++			Settings.Default.DOSBoxApiAddress = tbDosboxApi.Text.Trim();
++			DosboxApi.Address = Settings.Default.DOSBoxApiAddress;
++		}
+ 		Settings.Default.HideInvalidQuestGoals = cbHideInvalidQuestGoals.Checked;
+ 		Settings.Default.WarnMultipleReacquire = cbWarnOnMultipleReacquire.Checked;
+ 		Settings.Default.ShowOnlyDetectableMonsters = cbShowOnlyDetectableMonsters.Checked;
+@@ -1193,6 +1202,7 @@ public class OptionsForm : HackerBasedForm, IKeyboardHookCallback, IScalableSize
+ 			AddGameTitle(game2, Games.CurrentTitle(game2));
+ 		}
+ 		cbQuickScanDOSBox.Checked = Settings.Default.QuickScanDOSBox;
++		tbDosboxApi.Text = Settings.Default.DOSBoxApiAddress;
+ 		cbHideInvalidQuestGoals.Checked = Settings.Default.HideInvalidQuestGoals;
+ 		cbWarnOnMultipleReacquire.Checked = Settings.Default.WarnMultipleReacquire;
+ 		cbShowOnlyDetectableMonsters.Checked = Settings.Default.ShowOnlyDetectableMonsters;
+@@ -2876,6 +2886,8 @@ public class OptionsForm : HackerBasedForm, IKeyboardHookCallback, IScalableSize
+ 		this.cbOfferSwitch = new WhereAreWe.ScalableCheckBox();
+ 		this.cbWarnOnMultipleReacquire = new WhereAreWe.ScalableCheckBox();
+ 		this.cbQuickScanDOSBox = new WhereAreWe.ScalableCheckBox();
++		this.labelDosboxApi = new WhereAreWe.ScalableLabel();
++		this.tbDosboxApi = new WhereAreWe.ScalableTextBox();
+ 		this.label32 = new WhereAreWe.ScalableLabel();
+ 		this.lvGameTitles = new WhereAreWe.ScalableListView();
+ 		this.chTitle = new System.Windows.Forms.ColumnHeader();
+@@ -5022,6 +5034,8 @@ public class OptionsForm : HackerBasedForm, IKeyboardHookCallback, IScalableSize
+ 		this.tpDOSBox.Controls.Add(this.cbOfferSwitch);
+ 		this.tpDOSBox.Controls.Add(this.cbWarnOnMultipleReacquire);
+ 		this.tpDOSBox.Controls.Add(this.cbQuickScanDOSBox);
++		this.tpDOSBox.Controls.Add(this.labelDosboxApi);
++		this.tpDOSBox.Controls.Add(this.tbDosboxApi);
+ 		this.tpDOSBox.Controls.Add(this.label32);
+ 		this.tpDOSBox.Controls.Add(this.lvGameTitles);
+ 		this.tpDOSBox.Location = new System.Drawing.Point(4, 22);
+@@ -5113,6 +5127,19 @@ public class OptionsForm : HackerBasedForm, IKeyboardHookCallback, IScalableSize
+ 		this.cbQuickScanDOSBox.TabIndex = 2;
+ 		this.cbQuickScanDOSBox.Text = "&DOSBox memory quick-scan only (check only known memory offsets)";
+ 		this.cbQuickScanDOSBox.UseVisualStyleBackColor = true;
++		this.cbQuickScanDOSBox.Visible = false;
++		this.labelDosboxApi.Anchor = System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left;
++		this.labelDosboxApi.AutoSize = true;
++		this.labelDosboxApi.Location = new System.Drawing.Point(6, 181);
++		this.labelDosboxApi.Name = "labelDosboxApi";
++		this.labelDosboxApi.Size = new System.Drawing.Size(318, 13);
++		this.labelDosboxApi.TabIndex = 2;
++		this.labelDosboxApi.Text = "DOSBox Staging &API (host:port; empty = 127.0.0.1 port 8086 or 8080):";
++		this.tbDosboxApi.Anchor = System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left;
++		this.tbDosboxApi.Location = new System.Drawing.Point(374, 178);
++		this.tbDosboxApi.Name = "tbDosboxApi";
++		this.tbDosboxApi.Size = new System.Drawing.Size(140, 20);
++		this.tbDosboxApi.TabIndex = 3;
+ 		this.label32.AutoSize = true;
+ 		this.label32.Location = new System.Drawing.Point(5, 6);
+ 		this.label32.Name = "label32";
+diff --git a/WhereAreWe/Program.cs b/WhereAreWe/Program.cs
+index ca3c0ef5a529de35437fa1afc64fb4caafb17569..0592a0893dc97c50cea68c25f599613bc486208c 100644
+--- a/WhereAreWe/Program.cs
++++ b/WhereAreWe/Program.cs
+@@ -7,25 +7,34 @@ namespace WhereAreWe;
+ 
+ internal static class Program
+ {
++	private static string ConfigFilePath =>
++#if MAJORSILENCE_FORMS
++		System.Configuration.ConfigurationManager.OpenExeConfiguration(System.Configuration.ConfigurationUserLevel.PerUserRoamingAndLocal).FilePath;
++#else
++		AppDomain.CurrentDomain.SetupInformation.ConfigurationFile;
++#endif
++
+ 	[STAThread]
+ 	private static void Main()
+ 	{
++		PortableSettingsProvider.Configure();
+ 		try
+ 		{
+ 			if (Settings.Default.MaxUndoActions == -1)
+ 			{
+-				File.WriteAllText(AppDomain.CurrentDomain.SetupInformation.ConfigurationFile, Resources.app);
++				File.WriteAllText(ConfigFilePath, Resources.app);
+ 			}
+ 		}
+ 		catch (Exception)
+ 		{
+ 			if (MessageBox.Show("Could not locate the application's .config file.  Create a new file?", "Create new app.config file?", MessageBoxButtons.YesNo, MessageBoxIcon.Exclamation) == DialogResult.Yes)
+ 			{
+-				File.WriteAllText(AppDomain.CurrentDomain.SetupInformation.ConfigurationFile, Resources.app);
++				File.WriteAllText(ConfigFilePath, Resources.app);
+ 				Application.Restart();
+ 			}
+ 			return;
+ 		}
++		PortableSettingsProvider.MoveTempFiles();
+ 		Application.EnableVisualStyles();
+ 		Application.SetCompatibleTextRenderingDefault(defaultValue: false);
+ 		Application.Run(new MainForm());
+diff --git a/WhereAreWe/QuestsForm.cs b/WhereAreWe/QuestsForm.cs
+index 8c03bee4dcb4dde480811c2cda90a2dfa8e7e625..43ffed47fb6e75891cfe6f663b00537107a8b2ca 100644
+--- a/WhereAreWe/QuestsForm.cs
++++ b/WhereAreWe/QuestsForm.cs
+@@ -1650,8 +1650,8 @@ public class QuestsForm : HackerBasedForm
+ 		this.tvQuests.ScrollPosition = new System.Drawing.Point(0, 0);
+ 		this.tvQuests.Size = new System.Drawing.Size(442, 457);
+ 		this.tvQuests.TabIndex = 0;
+-		this.tvQuests.AfterExpand += new System.Windows.Forms.TreeViewEventHandler(tvQuests_AfterExpand);
+-		this.tvQuests.AfterSelect += new System.Windows.Forms.TreeViewEventHandler(tvQuests_AfterSelect);
++		this.tvQuests.AfterExpand += tvQuests_AfterExpand;
++		this.tvQuests.AfterSelect += tvQuests_AfterSelect;
+ 		this.tvQuests.NodeMouseClick += new System.Windows.Forms.TreeNodeMouseClickEventHandler(tvQuests_NodeMouseClick);
+ 		this.label52.AutoSize = true;
+ 		this.label52.Location = new System.Drawing.Point(3, 4);
+diff --git a/WhereAreWe/RedrawSuspender.cs b/WhereAreWe/RedrawSuspender.cs
+index 3abdeb6d5d06cff31df7baba446fce1e25b8b420..76ddfc6e088a4e5d9adc80cc3f52aa406b7c0dcf 100644
+--- a/WhereAreWe/RedrawSuspender.cs
++++ b/WhereAreWe/RedrawSuspender.cs
+@@ -35,6 +35,21 @@ public class RedrawSuspender : IDisposable
+ 		}
+ 	}
+ 
++#if MAJORSILENCE_FORMS
++	// A Majorsilence.Forms window is not a Control and has no redraw switch: nothing to suspend.
++	public RedrawSuspender(WindowBase window, bool autoRefresh = true, bool suspendImmediately = true)
++	{
++		_suspended = true;
++		_disposed = true;
++	}
++
++	public RedrawSuspender(WindowBase window, HashSet<Control> refreshSet, bool suspendImmediately = true)
++	{
++		_suspended = true;
++		_disposed = true;
++	}
++
++#endif
+ 	public void Suspend()
+ 	{
+ 		if (!_suspended)
+diff --git a/WhereAreWe/ScalableLabel.cs b/WhereAreWe/ScalableLabel.cs
+index 5ee7839c6593be3a6d2e6e91e0fa57260e259843..4ac243c3193e37079d6baf78dc0ddae9eab1d519 100644
+--- a/WhereAreWe/ScalableLabel.cs
++++ b/WhereAreWe/ScalableLabel.cs
+@@ -10,4 +10,17 @@ public class ScalableLabel : Label, IScalableFontSizeControl
+ 	{
+ 		FontScaler.SetFontSizeScale(this, ref m_origFontSize, scale);
+ 	}
++
++#if MAJORSILENCE_FORMS
++	// WinForms shrinks an auto-sized label to nothing when its text is emptied; Majorsilence keeps the last size
++	// (an emptied editable label showed as a white box)
++	protected override void OnTextChanged(System.EventArgs e)
++	{
++		base.OnTextChanged(e);
++		if (AutoSize && string.IsNullOrEmpty(Text) && Image == null && Width != 0)
++		{
++			Width = 0;
++		}
++	}
++#endif
+ }
+diff --git a/WhereAreWe/ScalableSplitContainer.cs b/WhereAreWe/ScalableSplitContainer.cs
+index c1f4af1adefc712eefab74d4e898ba849d0ccb9e..0500da0bc447e2bc2053f1288318a798e06b1dd1 100644
+--- a/WhereAreWe/ScalableSplitContainer.cs
++++ b/WhereAreWe/ScalableSplitContainer.cs
+@@ -5,7 +5,11 @@ using System.Windows.Forms;
+ 
+ namespace WhereAreWe;
+ 
++#if MAJORSILENCE_FORMS
++public class ScalableSplitContainer : WinFormsSplitContainer, IScalableFontSizeControl
++#else
+ public class ScalableSplitContainer : SplitContainer, IScalableFontSizeControl
++#endif
+ {
+ 	private float m_origFontSize;
+ 
+@@ -89,6 +93,14 @@ public class ScalableSplitContainer : SplitContainer, IScalableFontSizeControl
+ 
+ 	protected override void OnLayout(LayoutEventArgs e)
+ 	{
++#if MAJORSILENCE_FORMS
++		// Majorsilence lays the container out from its constructor, before the panels exist
++		if (base.Panel1 == null)
++		{
++			base.OnLayout(e);
++			return;
++		}
++#endif
+ 		if (m_bInLayout)
+ 		{
+ 			return;
+@@ -100,6 +112,9 @@ public class ScalableSplitContainer : SplitContainer, IScalableFontSizeControl
+ 			int num2 = (num ? 15 : 20);
+ 			num2 = (Global.FontScaling - 100) * num2 / 100 + 100;
+ 			base.OnLayout(e);
++#if MAJORSILENCE_FORMS
++			int dockedDistance = base.SplitterDistance;
++#endif
+ 			int distance = (num ? base.Height : base.Width);
+ 			if (FixedPercentScale > 0)
+ 			{
+@@ -115,6 +130,13 @@ public class ScalableSplitContainer : SplitContainer, IScalableFontSizeControl
+ 				CheckPanel1Scale(num2, distance);
+ 				CheckPanel2Scale(num2, distance);
+ 			}
++#if MAJORSILENCE_FORMS
++			// Moving the split doesn't re-dock the panels while this layout runs: do it again
++			if (base.SplitterDistance != dockedDistance)
++			{
++				base.OnLayout(e);
++			}
++#endif
+ 		}
+ 		finally
+ 		{
+diff --git a/WhereAreWe/ScriptsForm.cs b/WhereAreWe/ScriptsForm.cs
+index 8aacaa6d217e17b50f9720bbc8155338ca51ac8e..548e3aab6bc5b9496d46719a668869910c88c90d 100644
+--- a/WhereAreWe/ScriptsForm.cs
++++ b/WhereAreWe/ScriptsForm.cs
+@@ -752,7 +752,13 @@ public class ScriptsForm : HackerBasedForm
+ 	{
+ 		if (base.Hacker != null && Global.Cheats && lvSelectedScript.FocusedItem != null && ScriptsEditable && lvSelectedScript.FocusedItem.Tag is ScriptLine scriptLine)
+ 		{
+-			EditBytesForm editBytesForm = new EditBytesForm(base.TopLevelControl);
++			EditBytesForm editBytesForm = new EditBytesForm(
++#if MAJORSILENCE_FORMS
++			(Control)null
++#else
++			base.TopLevelControl
++#endif
++			);
+ 			editBytesForm.ForceLength = true;
+ 			editBytesForm.Bytes = scriptLine.Bytes;
+ 			int scriptCommandOffset = base.Hacker.ScriptCommandOffset;
+diff --git a/WhereAreWe/SheetOrganizerForm.cs b/WhereAreWe/SheetOrganizerForm.cs
+index 9c03af51ab652431851925d438a7110a6a05418b..11c0a4fd29539c75432766fa2a8ec1553a889a30 100644
+--- a/WhereAreWe/SheetOrganizerForm.cs
++++ b/WhereAreWe/SheetOrganizerForm.cs
+@@ -416,7 +416,7 @@ public class SheetOrganizerForm : HackerBasedForm
+ 		this.lvSheets.UseCompatibleStateImageBehavior = false;
+ 		this.lvSheets.View = System.Windows.Forms.View.Details;
+ 		this.lvSheets.ItemsRearranged += new WhereAreWe.DraggableListView.ItemsRearrangedEventHandler(lvSheets_ItemsRearranged);
+-		this.lvSheets.AfterLabelEdit += new System.Windows.Forms.LabelEditEventHandler(lvSheets_AfterLabelEdit);
++		this.lvSheets.AfterLabelEdit += lvSheets_AfterLabelEdit;
+ 		this.lvSheets.ColumnClick += new System.Windows.Forms.ColumnClickEventHandler(lvSheets_ColumnClick);
+ 		this.lvSheets.SelectedIndexChanged += new System.EventHandler(lvSheets_SelectedIndexChanged);
+ 		this.lvSheets.DoubleClick += new System.EventHandler(lvSheets_DoubleClick);
+diff --git a/WhereAreWe/SpellRefPanel.cs b/WhereAreWe/SpellRefPanel.cs
+index 95a971ce025c338055ee7c131903918d8e262aca..dd87344b5fa632d11f88866bfd82628a635611ae 100644
+--- a/WhereAreWe/SpellRefPanel.cs
++++ b/WhereAreWe/SpellRefPanel.cs
+@@ -62,7 +62,11 @@ public class SpellRefPanel : UserControl
+ 			{
+ 				if (value)
+ 				{
++#if MAJORSILENCE_FORMS
++					SpellListView.Columns.Insert(0, new ColumnHeader { Text = "Type" });
++#else
+ 					SpellListView.Columns.Insert(0, "Type");
++#endif
+ 				}
+ 				else
+ 				{
+diff --git a/WhereAreWe/SpellReferenceForm.cs b/WhereAreWe/SpellReferenceForm.cs
+index 96ed78272e70d286ceeae395ff636e0f29c59d80..39e55a6bc9086702cc23c675c9c602d6b3a275e2 100644
+--- a/WhereAreWe/SpellReferenceForm.cs
++++ b/WhereAreWe/SpellReferenceForm.cs
+@@ -443,7 +443,13 @@ public class SpellReferenceForm : HackerBasedForm
+ 			if (character != null && m_favorites.IsFavorite(base.Hacker.Game, character.Name, spell.BasicIndex) && !dictionary.ContainsKey(spell.BasicIndex))
+ 			{
+ 				ListViewItem lVIForSpell2 = spellList1.GetLVIForSpell(spell);
+-				ListViewItem.ListViewSubItem listViewSubItem = new ListViewItem.ListViewSubItem(lVIForSpell2, Spell.TypeString(spell));
++				ListViewItem.ListViewSubItem listViewSubItem = 
++#if MAJORSILENCE_FORMS
++				new ListViewItem.ListViewSubItem(Spell.TypeString(spell));
++#else
++				new ListViewItem.ListViewSubItem(lVIForSpell2, Spell.TypeString(spell));
++#endif
++
+ 				listViewSubItem.ForeColor = lVIForSpell2.ForeColor;
+ 				listViewSubItem.BackColor = lVIForSpell2.BackColor;
+ 				lVIForSpell2.SubItems.Insert(0, listViewSubItem);
+diff --git a/WhereAreWe/ViewInfoForm.cs b/WhereAreWe/ViewInfoForm.cs
+index 00287ea9317ff3a9b9808865b8131d91df081b30..ab8f9fd470d443972b2f1076a8a6dac3d52c1a5b 100644
+--- a/WhereAreWe/ViewInfoForm.cs
++++ b/WhereAreWe/ViewInfoForm.cs
+@@ -92,6 +92,12 @@ public class ViewInfoForm : CommonKeyForm
+ 		{
+ 			Center();
+ 		}
++#if MAJORSILENCE_FORMS
++		else if (m_wndCenterTo != null)
++		{
++			Global.CenterForm(this, m_wndCenterTo.Bounds);
++		}
++#endif
+ 	}
+ 
+ 	private void Center()
+@@ -180,6 +186,20 @@ public class ViewInfoForm : CommonKeyForm
+ 		viewInfoForm.ShowDialog();
+ 	}
+ 
++#if MAJORSILENCE_FORMS
++	private WindowBase m_wndCenterTo;
++
++	public static void ShowCentered(WindowBase wndParent, string strText, string strCaption, int iMaxHeight = -1)
++	{
++		ViewInfoForm viewInfoForm = new ViewInfoForm();
++		viewInfoForm.MaxHeight = iMaxHeight;
++		viewInfoForm.ItemText = strText;
++		viewInfoForm.Text = strCaption;
++		viewInfoForm.m_wndCenterTo = wndParent;
++		viewInfoForm.ShowDialog();
++	}
++
++#endif
+ 	public static void ShowCentered(Control ctrlParent, string strText, string strCaption, int iMaxHeight = -1)
+ 	{
+ 		ViewInfoForm viewInfoForm = new ViewInfoForm();
+diff --git a/WhereAreWe/ViewPartyForm.cs b/WhereAreWe/ViewPartyForm.cs
+index 1d1169a4fd27d561eff28f97f2ec246508ed2301..690bdc051be78b3e4905e514d45504840e7beb7d 100644
+--- a/WhereAreWe/ViewPartyForm.cs
++++ b/WhereAreWe/ViewPartyForm.cs
+@@ -1029,8 +1029,10 @@ public class ViewPartyForm : HackerBasedForm
+ 		{
+ 			m_charControls[SelectedCharacterIndex].SyncSplitters(m_charControls[m_previousCharacterIndex]);
+ 		}
++#if !MAJORSILENCE_FORMS
+ 		NativeMethods.ResumeDrawing(this);
+ 		m_refreshSet.Add(this);
++#endif
+ 		m_previousCharacterIndex = SelectedCharacterIndex;
+ 	}
+ 
+@@ -1053,7 +1055,9 @@ public class ViewPartyForm : HackerBasedForm
+ 
+ 	private void tcCharacters_Selecting(object sender, TabControlCancelEventArgs e)
+ 	{
++#if !MAJORSILENCE_FORMS
+ 		NativeMethods.SuspendDrawing(this);
++#endif
+ 		MoveQuickref(e.TabPageIndex);
+ 	}
+ 

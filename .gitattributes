@@ -1,0 +1,2 @@
+# The patch carries the decompiled sources' CRLF line ends byte for byte; never convert it.
+*.patch -text

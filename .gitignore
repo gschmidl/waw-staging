@@ -1,0 +1,15 @@
+# the original's downloads, the decompile + port (tools/build.py makes them), build output, releases
+/orig/
+/work/
+/build/
+/release/
+# working notes and one-off scripts
+/notes/
+/xp-*/
+*.log
+*-errors.txt
+*.out
+bin/
+obj/
+__pycache__/
+.ruff_cache/
