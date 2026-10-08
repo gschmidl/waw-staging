@@ -34,6 +34,11 @@ map images next to the program.
 - The surface map images are found next to the program (also The Bard's Tale's Skara Brae map, which the built-in
   map names with a folder of the map author's machine); with a `WhereAreWe.settings` file next to it the settings
   stay there too (portable).
+- Window placement on Windows: the DOSBox window is told apart from Windows' text input indicator (which DOSBox
+  Staging's process also owns); window frames are measured right at any display scaling (the original was 7% off
+  at 150%, so windows snapped and were arranged beside other windows); while "Keep DOSBox window location" is set
+  (the original's default) every run lays out the map, Game Info, Encounters and Party around DOSBox, fitted into
+  the room DOSBox leaves, instead of once ever, and other windows that would open over DOSBox open beside it.
 - The macOS/Linux build: Windows-only calls answer like a system without them, and a few WinForms layout
   behaviours the windows rely on are reproduced on Majorsilence.Forms.
 

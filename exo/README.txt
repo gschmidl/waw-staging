@@ -37,6 +37,12 @@ Changes from the original:
   map author's machine.
 - With a file named WhereAreWe.settings next to the program, the settings and
   the autosave file stay in this folder (an empty file is enough).
+- Windows: while "Keep DOSBox window location" is set (Options, DOSBox tab;
+  on by default), every run puts DOSBox at that location and the map,
+  Game Info, Encounters and Party windows around it, in the room DOSBox
+  leaves; other windows that would open over DOSBox open beside it. Window
+  frames are measured right at any display scaling (the original was 7% off
+  at 150%, so windows snapped beside each other).
 
 Usage outside eXoDOS: start DOSBox Staging with
     [webserver]

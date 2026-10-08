@@ -1106,10 +1106,10 @@ index 0000000000000000000000000000000000000000..1baca8549726b148c0165a11466ea6d8
 +}
 diff --git a/Staging/DosboxWindow.cs b/Staging/DosboxWindow.cs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a94f5ed9e2f52d4913099c4e1a8a407b0e440bda
+index 0000000000000000000000000000000000000000..55e187f0faa5cd80fb2eaacff10abea3510877e1
 --- /dev/null
 +++ b/Staging/DosboxWindow.cs
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,152 @@
 +// The DOSBox window for the Where Are We? port.
 +//
 +// On Windows this is DOSBox Staging's real top-level window (the process that owns the API's listening
@@ -1163,19 +1163,34 @@ index 0000000000000000000000000000000000000000..a94f5ed9e2f52d4913099c4e1a8a407b
 +		{
 +			// WAW's DOSBoxClass setting (default ^SDL_App$) never took part in its window search (WindowFinder
 +			// doesn't store the class pattern), so it isn't used here either: the pid identifies the window.
++			// The process also owns Windows' text input indicator (UAC_InputIndicatorOverlayWnd and
++			// "UAC Input Indicator": visible, topmost, no-activate, 47x47 in the screen corner), which
++			// comes first in z-order: only a window that can be activated counts, SDL's own window first.
 +			int pid = ListeningPid(DosboxApi.Port);
 +			if (pid > 0)
 +			{
++				IntPtr first = IntPtr.Zero;
 +				NativeMethods.EnumWindows(delegate(IntPtr hWnd, IntPtr lParam)
 +				{
 +					NativeMethods.GetWindowThreadProcessId(hWnd, out var processId);
-+					if (processId == pid && NativeMethods.IsWindowVisible(hWnd) && NativeMethods.GetWindow(hWnd, NativeMethods.GetWindow_Cmd.GW_OWNER) == IntPtr.Zero)
++					if (processId == pid && NativeMethods.IsWindowVisible(hWnd) && NativeMethods.GetWindow(hWnd, NativeMethods.GetWindow_Cmd.GW_OWNER) == IntPtr.Zero && CanActivate(hWnd))
 +					{
-+						s_hwnd = hWnd;
-+						return false;
++						if (string.Equals(NativeMethods.GetClassName(hWnd), "SDL_app", StringComparison.OrdinalIgnoreCase))
++						{
++							s_hwnd = hWnd;
++							return false;
++						}
++						if (first == IntPtr.Zero)
++						{
++							first = hWnd;
++						}
 +					}
 +					return true;
 +				}, IntPtr.Zero);
++				if (s_hwnd == IntPtr.Zero)
++				{
++					s_hwnd = first;
++				}
 +			}
 +		}
 +		catch (Exception ex)
@@ -1187,6 +1202,17 @@ index 0000000000000000000000000000000000000000..a94f5ed9e2f52d4913099c4e1a8a407b
 +			return DosboxApi.PseudoWindow;
 +		}
 +		return s_hwnd;
++	}
++
++	private const int WS_DISABLED = 0x08000000;
++
++	private const int WS_EX_TOOLWINDOW = 0x80;
++
++	private static bool CanActivate(IntPtr hWnd)
++	{
++		int style = NativeMethods.GetWindowLong(hWnd, -16);
++		int exStyle = NativeMethods.GetWindowLong(hWnd, NativeMethods.GWL_EXSTYLE);
++		return (style & WS_DISABLED) == 0 && (exStyle & (NativeMethods.WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)) == 0;
 +	}
 +
 +	private const int AF_INET = 2;
@@ -2746,7 +2772,7 @@ index 718206fd99d7205bc9566a5621d9560a95ae38ed..0698c7ee93f6862c294744526cc43790
  		this.chName.Text = "Skill Name";
  		this.chName.Width = 150;
 diff --git a/WhereAreWe/MainForm.cs b/WhereAreWe/MainForm.cs
-index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..54183f5081b342886d2a7ba27af7e4726d5d5273 100644
+index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..4798bf1de5d77529b54e558a4a3c48350a34e2b4 100644
 --- a/WhereAreWe/MainForm.cs
 +++ b/WhereAreWe/MainForm.cs
 @@ -2342,7 +2342,8 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
@@ -2759,7 +2785,36 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..54183f5081b342886d2a7ba27af7e472
  			}
  			else
  			{
-@@ -5819,6 +5820,13 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -4922,6 +4923,15 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 				{
+ 					m_iForceDBSizeGraceCounter = 0;
+ 				}
++				// port: the layout follows DOSBox's size (Staging sizes its window by the game's video mode)
++				if (m_bArrangedThisSession && Settings.Default.ForceDosBoxLocation)
++				{
++					Rectangle rcNow = m_hacker.GetDOSBoxRect();
++					if (rcNow.Size != m_szArrangedDOSBox && rcNow.Width >= 100 && rcNow.Height >= 100 && rcNow != MonitorOf(rcNow, bWorkArea: false))
++					{
++						AutoArrangeWindows(bSilent: true);
++					}
++				}
+ 			}
+ 			if (Settings.Default.AutoSave)
+ 			{
+@@ -5289,9 +5299,10 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 						m_bFirstRefresh = false;
+ 						NativeMethods.SetForegroundWindow(base.Handle);
+ 					}
+-					if (Settings.Default.NeedAutoArrange && Hacker != null && Hacker.IsValid)
++					if ((Settings.Default.NeedAutoArrange || (Settings.Default.ForceDosBoxLocation && !m_bArrangedThisSession)) && Hacker != null && Hacker.IsValid)
+ 					{
+-						AutoArrangeWindows(bSilent: true);
++						// port: arranged once per run (the original: once ever, at the first game found)
++						m_bArrangedThisSession |= AutoArrangeWindows(bSilent: true, bOpenWindows: true);
+ 					}
+ 					CheckShowScrollbars();
+ 					if (!m_bMonstersChanged)
+@@ -5819,6 +5830,13 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  		{
  			return Games.Name(Settings.Default.Game);
  		}
@@ -2773,7 +2828,7 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..54183f5081b342886d2a7ba27af7e472
  		return Path.GetFileNameWithoutExtension(m_strCurrentFile);
  	}
  
-@@ -6348,7 +6356,7 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -6348,7 +6366,7 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  		foreach (GameNames game in implementedGames)
  		{
  			string text = Settings.Default.GameTitles.Get(game);
@@ -2782,7 +2837,7 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..54183f5081b342886d2a7ba27af7e472
  			{
  				text = Games.DefaultTitle(game);
  				Settings.Default.GameTitles.Set(game, text);
-@@ -6494,15 +6502,9 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -6494,15 +6512,9 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  		{
  			OptionsForm.ResetSettings();
  		}
@@ -2801,7 +2856,7 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..54183f5081b342886d2a7ba27af7e472
  		Global.Windows = Settings.Default.Windows;
  		if (Global.Windows == null)
  		{
-@@ -8723,7 +8725,12 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -8723,7 +8735,12 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  		int num = 1;
  		foreach (string path in Settings.Default.MRUList.Paths)
  		{
@@ -2814,7 +2869,7 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..54183f5081b342886d2a7ba27af7e472
  			toolStripItem.Tag = path;
  			toolStripItem.Click += tsi_Click;
  		}
-@@ -8990,6 +8997,12 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -8990,6 +9007,12 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  			string text = (KeyboardHook.IsActive() ? " (hook)" : "");
  			if (Settings.Default.ShowCPU)
  			{
@@ -2827,7 +2882,7 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..54183f5081b342886d2a7ba27af7e472
  				if (Global.CpuCounter == null)
  				{
  					Global.CpuCounter = new PerformanceCounter("Process", "% Processor Time", Process.GetCurrentProcess().ProcessName);
-@@ -9450,7 +9463,7 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -9450,7 +9473,7 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  		int k;
  		for (k = 0; k < menuStrip1.Items.Count; k++)
  		{
@@ -2836,7 +2891,88 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..54183f5081b342886d2a7ba27af7e472
  			{
  				continue;
  			}
-@@ -10305,7 +10318,11 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -10206,12 +10229,80 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 		{
+ 			form.Location = Global.FixWindowLocation(windowInfo.NormalSize.Location);
+ 		}
++		if (flag && !windowInfo.Maximized)
++		{
++			KeepOffDOSBox(form);
++		}
+ 		if (windowInfo.Maximized)
+ 		{
+ 			form.WindowState = FormWindowState.Maximized;
+ 		}
+ 	}
+ 
++	/// <summary>Port: while the windows are arranged around DOSBox, a window that opens over DOSBox (centered on the
++	/// map, the original's place for a window without a saved one, or saved there) moves to the nearest place on
++	/// DOSBox's screen clear of DOSBox, overlapping the other open windows as little as possible.</summary>
++	private void KeepOffDOSBox(Form form)
++	{
++		if (m_bArrangedThisSession && Settings.Default.ForceDosBoxLocation && Hacker != null && Hacker.IsValid)
++		{
++			MoveOffDOSBox(form);
++		}
++	}
++
++	private void MoveOffDOSBox(Form form)
++	{
++		Rectangle rcDOSBox = Hacker.GetDOSBoxRect();
++		if (rcDOSBox.Width < 100 || rcDOSBox.Height < 100)
++		{
++			return;
++		}
++		Rectangle db = FrameRect(Hacker.DOSBoxWindow, rcDOSBox);
++		Rectangle rc = form.Bounds;
++		Rectangle overlap = Rectangle.Intersect(rc, db);
++		if (overlap.Width <= 16 || overlap.Height <= 16)
++		{
++			return;
++		}
++		Rectangle wa = MonitorOf(rcDOSBox, bWorkArea: true);
++		List<Rectangle> others = new List<Rectangle>();
++		foreach (Form value in Forms.Values)
++		{
++			if (value != form)
++			{
++				others.Add(value.Bounds);
++			}
++		}
++		long bestScore = long.MaxValue;
++		Point best = rc.Location;
++		int maxX = Math.Max(wa.Left, wa.Right - rc.Width);
++		int maxY = Math.Max(wa.Top, wa.Bottom - rc.Height);
++		for (int y = wa.Top; y <= maxY; y += 8)
++		{
++			for (int x = wa.Left; x <= maxX; x += 8)
++			{
++				Rectangle candidate = new Rectangle(x, y, rc.Width, rc.Height);
++				Rectangle onDOSBox = Rectangle.Intersect(candidate, db);
++				long score = (long)onDOSBox.Width * onDOSBox.Height * 1000;
++				foreach (Rectangle other in others)
++				{
++					Rectangle under = Rectangle.Intersect(candidate, other);
++					score += (long)under.Width * under.Height;
++				}
++				// ties: nearest to where the window would have opened
++				long dx = x - rc.X;
++				long dy = y - rc.Y;
++				score = score * 4096 + Math.Min(4095, (long)Math.Sqrt(dx * dx + dy * dy));
++				if (score < bestScore)
++				{
++					bestScore = score;
++					best = new Point(x, y);
++				}
++			}
++		}
++		form.Location = best;
++	}
++
+ 	private void CreateWindowNoShow<T>(ref T form, WindowType type, object param = null) where T : HackerBasedForm, new()
+ 	{
+ 		CreateWindow(ref form, type, bIgnoreAutoshow: true, param);
+@@ -10305,7 +10396,11 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  	{
  		StringsViewForm stringsViewForm = new StringsViewForm();
  		StringBuilder stringBuilder = new StringBuilder();
@@ -2848,15 +2984,243 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..54183f5081b342886d2a7ba27af7e472
  		stringBuilder.AppendFormat("Config file (ConfigurationUserLevel.None): {0}\r\n", ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.None).FilePath);
  		stringBuilder.AppendFormat("Config file (ConfigurationUserLevel.PerUserRoaming): {0}\r\n", ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.PerUserRoaming).FilePath);
  		stringBuilder.AppendFormat("Config file (ConfigurationUserLevel.PerUserRoamingAndLocal): {0}\r\n", ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.PerUserRoamingAndLocal).FilePath);
-@@ -11025,7 +11042,7 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
- 			Rectangle rectangle4 = (useExtendedWindowRect ? NativeMethods.GetExtendedWindowRect(m_formEncounters.Handle) : bounds2);
- 			m_formEncounters.Location = new Point(rectangle2.Left - (rectangle4.Left - bounds2.Left) - windowSnapMargins.Right, rectangle2.Bottom - (rectangle4.Top - bounds2.Top) - windowSnapMargins.Bottom);
- 			m_formEncounters.Width = base.Width;
--			m_formEncounters.Height = workingArea.Bottom - base.Bottom;
-+			m_formEncounters.Height = workingArea.Bottom - (base.Top + base.Height);
- 			Application.DoEvents();
+@@ -10969,7 +11064,7 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  		}
- 		if (m_formParty != null && !m_formParty.IsDisposed)
+ 	}
+ 
+-	private void AutoArrangeWindows(bool bSilent = false)
++	private bool AutoArrangeWindows(bool bSilent = false, bool bOpenWindows = false)
+ 	{
+ 		if (Hacker == null || !Hacker.IsValid)
+ 		{
+@@ -10977,67 +11072,189 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 			{
+ 				MessageBox.Show("The auto-arrange function requires that a known DOSBox game is running (check the \"Play\" tab of the Options window)", "Memory scanner not running", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+ 			}
+-			return;
++			return false;
+ 		}
+-		bool useExtendedWindowRect = Settings.Default.UseExtendedWindowRect;
+-		Rectangle workingArea = Screen.PrimaryScreen.WorkingArea;
+ 		Rectangle dOSBoxRect = Hacker.GetDOSBoxRect();
+-		Rectangle rectangle = (useExtendedWindowRect ? NativeMethods.GetExtendedWindowRect(Hacker.DOSBoxWindow) : dOSBoxRect);
+-		Rectangle rectangle2 = (useExtendedWindowRect ? NativeMethods.GetExtendedWindowRect(base.Handle) : base.Bounds);
+-		ExpandSizes windowSnapMargins = Settings.Default.WindowSnapMargins;
+ 		if (dOSBoxRect.Width < 100 || dOSBoxRect.Height < 100)
+ 		{
+ 			if (!bSilent)
+ 			{
+ 				MessageBox.Show($"A DOSBox window was located but its size is invalid ({dOSBoxRect.Width}x{dOSBoxRect.Height}).\r\n\r\nPlease be sure that the game is running properly.", "DOSBox Window Size Invalid", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+ 			}
+-			return;
++			return false;
+ 		}
+-		if (dOSBoxRect == Screen.PrimaryScreen.Bounds)
++		if (dOSBoxRect == MonitorOf(dOSBoxRect, bWorkArea: false))
+ 		{
+ 			if (!bSilent)
+ 			{
+ 				MessageBox.Show($"DOSBox appears to be full-screen, so the auto-arrange function is not available.", "DOSBox Window Size Invalid", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
+ 			}
+-			return;
++			return false;
++		}
++		if (bOpenWindows)
++		{
++			ShowPartyWindow(bHideErrors: true);
++			ShowGameInfo();
+ 		}
+-		if (rectangle.Location != workingArea.Location)
++		ArrangeAroundDOSBox();
++		Settings.Default.NeedAutoArrange = false;
++		return true;
++	}
++
++	// Port: the original's layout (map right of DOSBox, Game Info right of the map, Encounters below the map, Party
++	// below DOSBox) fitted into the room DOSBox leaves on its screen, so that no window ends up behind DOSBox when
++	// DOSBox is big (DOSBox Staging's window size, 150% displays). The places become the windows' saved positions,
++	// so a window of the layout that opens later (Encounters in combat) opens in its place. Runs when a game is
++	// found and when DOSBox changes size, while "Keep DOSBox window location" is set; Window > Auto-arrange
++	// any time.
++	private bool m_bArrangedThisSession;
++
++	private Size m_szArrangedDOSBox = Size.Empty;
++
++	/// <summary>The monitor (or its working area) a window's rectangle is on.</summary>
++	private static Rectangle MonitorOf(Rectangle rc, bool bWorkArea)
++	{
++		Point center = new Point(rc.Left + rc.Width / 2, rc.Top + rc.Height / 2);
++		foreach (Screen screen in Screen.AllScreens)
+ 		{
+-			Hacker.SetDOSBoxPosition(new Point(workingArea.Left - (rectangle.Left - dOSBoxRect.Left), workingArea.Top - (rectangle.Top - dOSBoxRect.Top)));
+-			Thread.Sleep(300);
++			if (screen.Bounds.Contains(center))
++			{
++				return bWorkArea ? screen.WorkingArea : screen.Bounds;
++			}
+ 		}
+-		base.Location = new Point(rectangle.Right - (rectangle2.Left - base.Bounds.Left) - windowSnapMargins.Left, rectangle.Top - windowSnapMargins.Top);
++		return bWorkArea ? Screen.PrimaryScreen.WorkingArea : Screen.PrimaryScreen.Bounds;
++	}
++
++	/// <summary>Visible frame of a window ("extended" rect), or its bounds without UseExtendedWindowRect.</summary>
++	private static Rectangle FrameRect(IntPtr hWnd, Rectangle bounds)
++	{
++		return Settings.Default.UseExtendedWindowRect ? NativeMethods.GetExtendedWindowRect(hWnd) : bounds;
++	}
++
++	/// <summary>Window bounds whose visible frame is rcFrame, for a window with this form's frame margins.</summary>
++	private static Rectangle BoundsForFrame(Rectangle rcFrame, Rectangle marginsFrom, Rectangle marginsFromFrame)
++	{
++		int left = marginsFromFrame.Left - marginsFrom.Left;
++		int top = marginsFromFrame.Top - marginsFrom.Top;
++		int right = marginsFrom.Right - marginsFromFrame.Right;
++		int bottom = marginsFrom.Bottom - marginsFromFrame.Bottom;
++		return new Rectangle(rcFrame.Left - left, rcFrame.Top - top, rcFrame.Width + left + right, rcFrame.Height + top + bottom);
++	}
++
++	private void ArrangeAroundDOSBox()
++	{
++		IntPtr dosbox = Hacker.DOSBoxWindow;
++		Rectangle rcDOSBox = Hacker.GetDOSBoxRect();
++		Rectangle rcFrame = FrameRect(dosbox, rcDOSBox);
++		Rectangle wa = MonitorOf(rcDOSBox, bWorkArea: true);
++		Point ptDOSBox = Settings.Default.ForceDosBoxLocation ? Settings.Default.DosBoxWindowRect.Location : new Point(wa.Left - (rcFrame.Left - rcDOSBox.Left), wa.Top - (rcFrame.Top - rcDOSBox.Top));
++		if (rcDOSBox.Location != ptDOSBox)
++		{
++			NativeMethods.SetWindowPosAsync(dosbox, IntPtr.Zero, ptDOSBox.X, ptDOSBox.Y, 0, 0, NativeMethods.SetWindowPosFlags.PosOnly | NativeMethods.SetWindowPosFlags.NOACTIVATE);
++			NativeMethods.JoinSWPThread();
++			rcDOSBox = Hacker.GetDOSBoxRect();
++			rcFrame = FrameRect(dosbox, rcDOSBox);
++			wa = MonitorOf(rcDOSBox, bWorkArea: true);
++		}
++		m_szArrangedDOSBox = rcDOSBox.Size;
++		if (WindowState != FormWindowState.Normal)
++		{
++			WindowState = FormWindowState.Normal;
++		}
++		Rectangle rcMain = Bounds;
++		Rectangle rcMainFrame = FrameRect(Handle, rcMain);
++		// the map: 18x18 squares at 200% (the original), as much of that as fits right of DOSBox
++		int right = wa.Right - rcFrame.Right;
+ 		FitWindow(18, 18, 200);
+-		Application.DoEvents();
+-		rectangle2 = (useExtendedWindowRect ? NativeMethods.GetExtendedWindowRect(base.Handle) : base.Bounds);
+-		if (m_formInfo != null && !m_formInfo.IsDisposed)
+-		{
+-			Rectangle bounds = m_formInfo.Bounds;
+-			Rectangle rectangle3 = (useExtendedWindowRect ? NativeMethods.GetExtendedWindowRect(m_formInfo.Handle) : bounds);
+-			m_formInfo.Location = new Point(rectangle2.Right - (rectangle3.Left - bounds.Left) - windowSnapMargins.Right, rectangle2.Top - (rectangle3.Top - bounds.Top) - windowSnapMargins.Bottom);
+-			m_formInfo.Width = Math.Min(workingArea.Right - base.Bounds.Right, 350);
+-			m_formInfo.Height = base.Height;
+-			Application.DoEvents();
++		Size szMain = FrameRect(Handle, Bounds).Size;
++		Rectangle main = new Rectangle(rcFrame.Right, wa.Top, Math.Max(Math.Min(szMain.Width, right), 200), Math.Min(szMain.Height, wa.Height));
++		// room left for the other three: right of the map, below the map, below DOSBox
++		Rectangle rightOfMain = new Rectangle(main.Right, wa.Top, Math.Min(wa.Right - main.Right, 350), main.Height);
++		Rectangle belowMain = new Rectangle(rcFrame.Right, main.Bottom, wa.Right - rcFrame.Right, wa.Bottom - main.Bottom);
++		Rectangle belowDOSBox = new Rectangle(rcFrame.Left, rcFrame.Bottom, rcFrame.Width, wa.Bottom - rcFrame.Bottom);
++		if (belowMain.Height < 120 && belowDOSBox.Height < 120 && rightOfMain.Width < 200)
++		{
++			// no room anywhere: the map gives up the lower half of its column
++			main.Height = Math.Max(main.Height / 2, 200);
++			belowMain = new Rectangle(rcFrame.Right, main.Bottom, wa.Right - rcFrame.Right, wa.Bottom - main.Bottom);
++		}
++		Rectangle[] candidates = { rightOfMain, belowMain, belowDOSBox };
++		bool[] usable = { rightOfMain.Width >= 200 && rightOfMain.Height >= 120, belowMain.Width >= 200 && belowMain.Height >= 120, belowDOSBox.Width >= 200 && belowDOSBox.Height >= 120 };
++		// each window's preferred strips (the original's places first); a strip taken already is shared
++		WindowType[] types = { WindowType.GameInfo, WindowType.Encounter, WindowType.Party };
++		int[][] preferences = { new int[3] { 0, 1, 2 }, new int[3] { 1, 2, 0 }, new int[3] { 2, 1, 0 } };
++		List<WindowType>[] occupants = { new List<WindowType>(), new List<WindowType>(), new List<WindowType>() };
++		for (int i = 0; i < types.Length; i++)
++		{
++			int strip = -1;
++			foreach (int p in preferences[i])
++			{
++				if (usable[p] && occupants[p].Count == 0)
++				{
++					strip = p;
++					break;
++				}
++			}
++			if (strip < 0)
++			{
++				foreach (int p in preferences[i])
++				{
++					if (usable[p])
++					{
++						strip = p;
++						break;
++					}
++				}
++			}
++			if (strip >= 0)
++			{
++				occupants[strip].Add(types[i]);
++			}
+ 		}
+-		if (m_formEncounters != null && !m_formEncounters.IsDisposed)
++		Dictionary<WindowType, Rectangle> places = new Dictionary<WindowType, Rectangle>();
++		places[WindowType.Main] = main;
++		for (int s = 0; s < 3; s++)
+ 		{
+-			Rectangle bounds2 = m_formEncounters.Bounds;
+-			Rectangle rectangle4 = (useExtendedWindowRect ? NativeMethods.GetExtendedWindowRect(m_formEncounters.Handle) : bounds2);
+-			m_formEncounters.Location = new Point(rectangle2.Left - (rectangle4.Left - bounds2.Left) - windowSnapMargins.Right, rectangle2.Bottom - (rectangle4.Top - bounds2.Top) - windowSnapMargins.Bottom);
+-			m_formEncounters.Width = base.Width;
+-			m_formEncounters.Height = workingArea.Bottom - base.Bottom;
+-			Application.DoEvents();
++			int n = occupants[s].Count;
++			Rectangle rc = candidates[s];
++			for (int k = 0; k < n; k++)
++			{
++				places[occupants[s][k]] = rc.Width >= rc.Height
++					? new Rectangle(rc.Left + rc.Width * k / n, rc.Top, rc.Width * (k + 1) / n - rc.Width * k / n, rc.Height)
++					: new Rectangle(rc.Left, rc.Top + rc.Height * k / n, rc.Width, rc.Height * (k + 1) / n - rc.Height * k / n);
++			}
+ 		}
+-		if (m_formParty != null && !m_formParty.IsDisposed)
++		Bounds = BoundsForFrame(main, rcMain, rcMainFrame);
++		Global.Windows.SetNormalSize(WindowType.Main, Bounds);
++		Form[] forms = { m_formInfo, m_formEncounters, m_formParty };
++		for (int i = 0; i < types.Length; i++)
+ 		{
+-			Rectangle bounds3 = m_formParty.Bounds;
+-			Rectangle rectangle5 = (useExtendedWindowRect ? NativeMethods.GetExtendedWindowRect(m_formParty.Handle) : bounds3);
+-			m_formParty.Location = new Point(rectangle.Left - (rectangle5.Left - bounds3.Left) - windowSnapMargins.Right, rectangle.Bottom - (rectangle5.Top - bounds3.Top) - windowSnapMargins.Bottom);
+-			m_formParty.Width = rectangle.Width + (bounds3.Width - rectangle5.Width);
+-			m_formParty.Height = workingArea.Bottom - dOSBoxRect.Bottom;
+-			Application.DoEvents();
++			if (!places.ContainsKey(types[i]))
++			{
++				continue;
++			}
++			Form form = forms[i];
++			bool open = form != null && !form.IsDisposed && form.IsHandleCreated;
++			Rectangle bounds = open ? BoundsForFrame(places[types[i]], form.Bounds, FrameRect(form.Handle, form.Bounds)) : BoundsForFrame(places[types[i]], rcMain, rcMainFrame);
++			Global.Windows.SetNormalSize(types[i], bounds);
++			if (open)
++			{
++				if (form.WindowState != FormWindowState.Normal)
++				{
++					form.WindowState = FormWindowState.Normal;
++				}
++				form.Bounds = bounds;
++			}
+ 		}
+-		Settings.Default.NeedAutoArrange = false;
++		// windows outside the layout that are open already (e.g. shown before the game was found) leave DOSBox too
++		foreach (Form other in Forms.Values)
++		{
++			if (other != this && Array.IndexOf(forms, other) < 0 && other.WindowState == FormWindowState.Normal)
++			{
++				MoveOffDOSBox(other);
++			}
++		}
++		Application.DoEvents();
+ 	}
+ 
+ 	private void MenuHelpRunWizard()
 diff --git a/WhereAreWe/MapBook.cs b/WhereAreWe/MapBook.cs
 index 13a96390331c1b3761fbdfc9f81739f6a8b34de2..dfa0d14e2af9139c017611ebf2a1c3e684d69d21 100644
 --- a/WhereAreWe/MapBook.cs
@@ -3087,7 +3451,7 @@ index c74ccf9434a3ac9f693e7be36d346777af2d9b38..bc1bddb3571d3838f8ba4d60962809ff
  		return GetProcess(Settings.Default.GameTitles.Get(Game, string.Empty));
  	}
 diff --git a/WhereAreWe/NativeMethods.cs b/WhereAreWe/NativeMethods.cs
-index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d89e5c6c7 100644
+index 96850cada75fcbdac9e37a7a7af9a370faa749bc..af2819ff10ad0584ed47b3f1e88ac5816e716487 100644
 --- a/WhereAreWe/NativeMethods.cs
 +++ b/WhereAreWe/NativeMethods.cs
 @@ -11,6 +11,9 @@ namespace WhereAreWe;
@@ -3117,12 +3481,13 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +		}
 +		return ShowScrollBar_Native(hWnd, wBar, bShow);
 +	}
-+
-+	[DllImport("user32.dll", EntryPoint = "GetAsyncKeyState")]
-+	private static extern short GetAsyncKeyState_Native(Keys vKey);
  
 -	[DllImport("user32.dll")]
 -	internal static extern short GetAsyncKeyState(Keys vKey);
++	[DllImport("user32.dll", EntryPoint = "GetAsyncKeyState")]
++	private static extern short GetAsyncKeyState_Native(Keys vKey);
+ 
+-	[DllImport("user32.dll", SetLastError = true)]
 +	internal static short GetAsyncKeyState(Keys vKey)
 +	{
 +		if (!Win32)
@@ -3131,8 +3496,7 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +		}
 +		return GetAsyncKeyState_Native(vKey);
 +	}
- 
--	[DllImport("user32.dll", SetLastError = true)]
++
 +	[DllImport("user32.dll", SetLastError = true, EntryPoint = "PostMessage")]
  	[return: MarshalAs(UnmanagedType.Bool)]
 -	internal static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wp, IntPtr lp);
@@ -3398,7 +3762,8 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
  	[return: MarshalAs(UnmanagedType.Bool)]
 -	internal static extern bool IsWindow(IntPtr hWnd);
 +	private static extern bool IsWindow_Native(IntPtr hWnd);
-+
+ 
+-	[DllImport("user32.dll")]
 +	internal static bool IsWindow(IntPtr hWnd)
 +	{
 +		if (hWnd == DosboxApi.PseudoWindow)
@@ -3411,8 +3776,7 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +		}
 +		return IsWindow_Native(hWnd);
 +	}
- 
--	[DllImport("user32.dll")]
++
 +	[DllImport("user32.dll", EntryPoint = "SetForegroundWindow")]
  	[return: MarshalAs(UnmanagedType.Bool)]
 -	internal static extern bool SetForegroundWindow(IntPtr hWnd);
@@ -3456,7 +3820,9 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
  	[return: MarshalAs(UnmanagedType.Bool)]
 -	internal static extern bool GetWindowPlacement(IntPtr hWnd, out WINDOWPLACEMENT lpwndpl);
 +	private static extern bool GetWindowPlacement_Native(IntPtr hWnd, out WINDOWPLACEMENT lpwndpl);
-+
+ 
+-	[DllImport("user32.dll", SetLastError = true)]
+-	internal static extern IntPtr GetWindow(IntPtr hWnd, GetWindow_Cmd uCmd);
 +	internal static bool GetWindowPlacement(IntPtr hWnd, out WINDOWPLACEMENT lpwndpl)
 +	{
 +		if (!Win32)
@@ -3466,10 +3832,14 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +		}
 +		return GetWindowPlacement_Native(hWnd, out lpwndpl);
 +	}
-+
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern IntPtr GetTopWindow(IntPtr hWnd);
 +	[DllImport("user32.dll", SetLastError = true, EntryPoint = "GetWindow")]
 +	private static extern IntPtr GetWindow_Native(IntPtr hWnd, GetWindow_Cmd uCmd);
-+
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern IntPtr GetActiveWindow();
 +	internal static IntPtr GetWindow(IntPtr hWnd, GetWindow_Cmd uCmd)
 +	{
 +		if (!Win32)
@@ -3493,9 +3863,7 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +
 +	[DllImport("user32.dll", EntryPoint = "GetActiveWindow")]
 +	private static extern IntPtr GetActiveWindow_Native();
- 
--	[DllImport("user32.dll", SetLastError = true)]
--	internal static extern IntPtr GetWindow(IntPtr hWnd, GetWindow_Cmd uCmd);
++
 +	internal static IntPtr GetActiveWindow()
 +	{
 +		if (!Win32)
@@ -3504,19 +3872,15 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +		}
 +		return GetActiveWindow_Native();
 +	}
- 
--	[DllImport("user32.dll")]
--	internal static extern IntPtr GetTopWindow(IntPtr hWnd);
++
 +	[DllImport("kernel32.dll", EntryPoint = "OpenProcess")]
 +	private static extern IntPtr OpenProcessNative(uint dwDesiredAccess, int bInheritHandle, uint dwProcessId);
  
--	[DllImport("user32.dll")]
--	internal static extern IntPtr GetActiveWindow();
-+	[DllImport("kernel32.dll", EntryPoint = "CloseHandle")]
-+	private static extern int CloseHandleNative(IntPtr hObject);
- 
 -	[DllImport("kernel32.dll")]
 -	internal static extern IntPtr OpenProcess(uint dwDesiredAccess, int bInheritHandle, uint dwProcessId);
++	[DllImport("kernel32.dll", EntryPoint = "CloseHandle")]
++	private static extern int CloseHandleNative(IntPtr hObject);
++
 +	internal static IntPtr OpenProcess(uint dwDesiredAccess, int bInheritHandle, uint dwProcessId)
 +	{
 +		if (dwProcessId == DosboxApi.PseudoPid)
@@ -3698,12 +4062,12 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +		}
 +		return EnumWindows_Native(lpEnumFunc, lParam);
 +	}
-+
-+	[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "GetWindowText")]
-+	private static extern int GetWindowText_Native(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
  
 -	[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
 -	internal static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
++	[DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "GetWindowText")]
++	private static extern int GetWindowText_Native(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
++
 +	internal static int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount)
 +	{
 +		if (!Win32)
@@ -3774,9 +4138,7 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +
 +	[DllImport("user32.dll", EntryPoint = "DeferWindowPos")]
 +	private static extern IntPtr DeferWindowPos_Native(IntPtr hWinPosInfo, IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, [MarshalAs(UnmanagedType.U4)] DeferWindowPosCommands uFlags);
- 
--	[DllImport("user32.dll")]
--	internal static extern IntPtr DeferWindowPos(IntPtr hWinPosInfo, IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, [MarshalAs(UnmanagedType.U4)] DeferWindowPosCommands uFlags);
++
 +	internal static IntPtr DeferWindowPos(IntPtr hWinPosInfo, IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, DeferWindowPosCommands uFlags)
 +	{
 +		if (!Win32)
@@ -3787,11 +4149,12 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +	}
  
 -	[DllImport("user32.dll")]
--	internal static extern bool EndDeferWindowPos(IntPtr hWinPosInfo);
+-	internal static extern IntPtr DeferWindowPos(IntPtr hWinPosInfo, IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, [MarshalAs(UnmanagedType.U4)] DeferWindowPosCommands uFlags);
 +	[DllImport("user32.dll", EntryPoint = "EndDeferWindowPos")]
 +	private static extern bool EndDeferWindowPos_Native(IntPtr hWinPosInfo);
  
 -	[DllImport("user32.dll")]
+-	internal static extern bool EndDeferWindowPos(IntPtr hWinPosInfo);
 +	internal static bool EndDeferWindowPos(IntPtr hWinPosInfo)
 +	{
 +		if (!Win32)
@@ -3800,7 +4163,8 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +		}
 +		return EndDeferWindowPos_Native(hWinPosInfo);
 +	}
-+
+ 
+-	[DllImport("user32.dll")]
 +	[DllImport("user32.dll", EntryPoint = "IsWindowVisible")]
  	[return: MarshalAs(UnmanagedType.Bool)]
 -	internal static extern bool IsWindowVisible(IntPtr hWnd);
@@ -3842,9 +4206,7 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 -	internal static extern int GetScrollPos(IntPtr hWnd, int nBar);
 +	[DllImport("user32.dll", CharSet = CharSet.Auto, EntryPoint = "GetScrollPos")]
 +	private static extern int GetScrollPos_Native(IntPtr hWnd, int nBar);
- 
--	[DllImport("user32.dll")]
--	internal static extern int SetScrollPos(IntPtr hWnd, int nBar, int nPos, bool bRedraw);
++
 +	internal static int GetScrollPos(IntPtr hWnd, int nBar)
 +	{
 +		if (!Win32)
@@ -3856,7 +4218,9 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +
 +	[DllImport("user32.dll", EntryPoint = "SetScrollPos")]
 +	private static extern int SetScrollPos_Native(IntPtr hWnd, int nBar, int nPos, bool bRedraw);
-+
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern int SetScrollPos(IntPtr hWnd, int nBar, int nPos, bool bRedraw);
 +	internal static int SetScrollPos(IntPtr hWnd, int nBar, int nPos, bool bRedraw)
 +	{
 +		if (!Win32)
@@ -3876,9 +4240,7 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 -	internal static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 +	[DllImport("user32.dll", EntryPoint = "SetWindowLong")]
 +	private static extern int SetWindowLong_Native(IntPtr hWnd, int nIndex, int dwNewLong);
- 
--	[DllImport("user32.dll", SetLastError = true)]
--	internal static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
++
 +	internal static int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong)
 +	{
 +		if (!Win32)
@@ -3890,7 +4252,9 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +
 +	[DllImport("user32.dll", SetLastError = true, EntryPoint = "SetParent")]
 +	private static extern IntPtr SetParent_Native(IntPtr hWndChild, IntPtr hWndNewParent);
-+
+ 
+-	[DllImport("user32.dll", SetLastError = true)]
+-	internal static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
 +	internal static IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent)
 +	{
 +		if (!Win32)
@@ -3924,9 +4288,7 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +
 +	[DllImport("dwmapi.dll", EntryPoint = "DwmSetWindowAttribute")]
 +	private static extern int DwmSetWindowAttribute_Native(IntPtr hwnd, DWMWINDOWATTRIBUTE dwAttribute, ref RECT pvAttribute, int cbAttribute);
- 
--	[DllImport("dwmapi.dll")]
--	internal static extern int DwmSetWindowAttribute(IntPtr hwnd, DWMWINDOWATTRIBUTE dwAttribute, ref RECT pvAttribute, int cbAttribute);
++
 +	internal static int DwmSetWindowAttribute(IntPtr hwnd, DWMWINDOWATTRIBUTE dwAttribute, ref RECT pvAttribute, int cbAttribute)
 +	{
 +		if (!Win32)
@@ -3935,14 +4297,10 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +		}
 +		return DwmSetWindowAttribute_Native(hwnd, dwAttribute, ref pvAttribute, cbAttribute);
 +	}
- 
--	[DllImport("user32.dll")]
--	internal static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
++
 +	[DllImport("user32.dll", EntryPoint = "GetClientRect")]
 +	private static extern bool GetClientRect_Native(IntPtr hWnd, out RECT lpRect);
- 
--	[DllImport("user32.dll")]
--	internal static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
++
 +	internal static bool GetClientRect(IntPtr hWnd, out RECT lpRect)
 +	{
 +		if (!Win32)
@@ -3952,10 +4310,14 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +		}
 +		return GetClientRect_Native(hWnd, out lpRect);
 +	}
-+
+ 
+-	[DllImport("dwmapi.dll")]
+-	internal static extern int DwmSetWindowAttribute(IntPtr hwnd, DWMWINDOWATTRIBUTE dwAttribute, ref RECT pvAttribute, int cbAttribute);
 +	[DllImport("user32.dll", EntryPoint = "MonitorFromWindow")]
 +	private static extern IntPtr MonitorFromWindow_Native(IntPtr hwnd, uint dwFlags);
-+
+ 
+-	[DllImport("user32.dll")]
+-	internal static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
 +	internal static IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags)
 +	{
 +		if (!Win32)
@@ -3965,11 +4327,13 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +		return MonitorFromWindow_Native(hwnd, dwFlags);
 +	}
  
--	[DllImport("Shcore.dll")]
--	internal static extern int GetScaleFactorForMonitor(IntPtr hMon, out DEVICE_SCALE_FACTOR pScale);
+-	[DllImport("user32.dll")]
+-	internal static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
 +	[DllImport("Shcore.dll", EntryPoint = "GetScaleFactorForMonitor")]
 +	private static extern int GetScaleFactorForMonitor_Native(IntPtr hMon, out DEVICE_SCALE_FACTOR pScale);
-+
+ 
+-	[DllImport("Shcore.dll")]
+-	internal static extern int GetScaleFactorForMonitor(IntPtr hMon, out DEVICE_SCALE_FACTOR pScale);
 +	internal static int GetScaleFactorForMonitor(IntPtr hMon, out DEVICE_SCALE_FACTOR pScale)
 +	{
 +		if (!Win32)
@@ -3982,7 +4346,87 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
  
  	public static Rectangle GetClientRect(IntPtr hWnd)
  	{
-@@ -1164,12 +1687,30 @@ public static class NativeMethods
+@@ -1100,6 +1623,68 @@ public static class NativeMethods
+ 		return new Rectangle(lpRect.Left, lpRect.Top, lpRect.Right - lpRect.Left, lpRect.Bottom - lpRect.Top);
+ 	}
+ 
++	// Port: DWM's frame bounds are physical pixels whatever the caller's DPI awareness. The original scaled them by
++	// GetScaleFactorForMonitor, which only knows 100/140/180% (140 at 150%) and scales absolute coordinates (wrong
++	// on a monitor left of or above the main one): at 150% the frames came out up to ~120 px beside the windows,
++	// so windows snapped and auto-arranged to places beside them. Physical rects now come from a per-monitor aware
++	// thread context and are mapped onto this process's coordinates through the window's own two rects.
++	[DllImport("user32.dll", EntryPoint = "SetThreadDpiAwarenessContext")]
++	private static extern IntPtr SetThreadDpiAwarenessContext_Native(IntPtr dpiContext);
++
++	private static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new IntPtr(-4);
++
++	/// <summary>Runs f with this thread per-monitor DPI aware (physical pixels); false where Windows can't
++	/// (before Windows 10 1607).</summary>
++	private static bool InPhysicalPixels(System.Action f)
++	{
++		IntPtr old;
++		try
++		{
++			old = SetThreadDpiAwarenessContext_Native(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
++		}
++		catch (EntryPointNotFoundException)
++		{
++			return false;
++		}
++		if (old == IntPtr.Zero)
++		{
++			return false;
++		}
++		try
++		{
++			f();
++		}
++		finally
++		{
++			SetThreadDpiAwarenessContext_Native(old);
++		}
++		return true;
++	}
++
++	/// <summary>A physical rectangle on a window's monitor in this process's coordinates, mapped through the
++	/// window's physical and logical rects; false if those can't be had.</summary>
++	private static bool PhysicalToLogical(IntPtr hWnd, RECT physical, out Rectangle logical)
++	{
++		logical = Rectangle.Empty;
++		RECT p = default(RECT);
++		bool ok = false;
++		if (!InPhysicalPixels(delegate
++		{
++			ok = GetWindowRect_Native(new HandleRef(null, hWnd), out p);
++		}) || !ok || !GetWindowRect_Native(new HandleRef(null, hWnd), out var l) || p.Right <= p.Left || p.Bottom <= p.Top)
++		{
++			return false;
++		}
++		double rx = (double)(l.Right - l.Left) / (double)(p.Right - p.Left);
++		double ry = (double)(l.Bottom - l.Top) / (double)(p.Bottom - p.Top);
++		int left = l.Left + (int)Math.Round((double)(physical.Left - p.Left) * rx);
++		int top = l.Top + (int)Math.Round((double)(physical.Top - p.Top) * ry);
++		int right = l.Left + (int)Math.Round((double)(physical.Right - p.Left) * rx);
++		int bottom = l.Top + (int)Math.Round((double)(physical.Bottom - p.Top) * ry);
++		logical = new Rectangle(left, top, right - left, bottom - top);
++		return true;
++	}
++
+ 	public static Rectangle GetExtendedWindowRect(IntPtr hWnd)
+ 	{
+ 		RECT pvAttribute = default(RECT);
+@@ -1109,6 +1694,10 @@ public static class NativeMethods
+ 			{
+ 				GetWindowRect(new HandleRef(null, hWnd), out pvAttribute);
+ 			}
++			else if (PhysicalToLogical(hWnd, pvAttribute, out var frame))
++			{
++				return frame;
++			}
+ 			else
+ 			{
+ 				GetScaleFactorForMonitor(MonitorFromWindow(hWnd, 2u), out var pScale);
+@@ -1164,12 +1753,30 @@ public static class NativeMethods
  		}
  	}
  
@@ -4000,12 +4444,12 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +		}
 +		return GetIconInfo_Native(hIcon, ref pIconInfo);
 +	}
++
++	[DllImport("user32.dll", EntryPoint = "CreateIconIndirect")]
++	private static extern IntPtr CreateIconIndirect_Native(ref IconInfo icon);
  
 -	[DllImport("user32.dll")]
 -	internal static extern IntPtr CreateIconIndirect(ref IconInfo icon);
-+	[DllImport("user32.dll", EntryPoint = "CreateIconIndirect")]
-+	private static extern IntPtr CreateIconIndirect_Native(ref IconInfo icon);
-+
 +	internal static IntPtr CreateIconIndirect(ref IconInfo icon)
 +	{
 +		if (!Win32)
@@ -4017,7 +4461,7 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
  
  	public static Cursor CreateCursor(Icon icon, int xHotSpot, int yHotSpot)
  	{
-@@ -1181,11 +1722,29 @@ public static class NativeMethods
+@@ -1181,11 +1788,29 @@ public static class NativeMethods
  		return new Cursor(CreateIconIndirect(ref pIconInfo));
  	}
  
@@ -4051,7 +4495,7 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
  
  	public static IntPtr WindowAtPoint(Point pt)
  	{
-@@ -1524,25 +2083,97 @@ public static class NativeMethods
+@@ -1524,25 +2149,97 @@ public static class NativeMethods
  		PostMessage(hWnd, 274, (IntPtr)61728, IntPtr.Zero);
  	}
  
@@ -4059,9 +4503,7 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 -	internal static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
 +	[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true, EntryPoint = "SetWindowsHookEx")]
 +	private static extern IntPtr SetWindowsHookEx_Native(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
- 
--	[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
--	internal static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
++
 +	internal static IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId)
 +	{
 +		if (!Win32)
@@ -4073,7 +4515,9 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +
 +	[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true, EntryPoint = "CallNextHookEx")]
 +	private static extern IntPtr CallNextHookEx_Native(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-+
+ 
+-	[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+-	internal static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 +	internal static IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam)
 +	{
 +		if (!Win32)
@@ -4097,10 +4541,14 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +		}
 +		return UnhookWindowsHookEx_Native(hhk);
 +	}
-+
+ 
+-	[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+-	internal static extern IntPtr GetModuleHandle(string lpModuleName);
 +	[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "GetModuleHandle")]
 +	private static extern IntPtr GetModuleHandle_Native(string lpModuleName);
-+
+ 
+-	[DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+-	internal static extern IntPtr LoadLibrary(string lpFileName);
 +	internal static IntPtr GetModuleHandle(string lpModuleName)
 +	{
 +		if (!Win32)
@@ -4109,14 +4557,10 @@ index 96850cada75fcbdac9e37a7a7af9a370faa749bc..d8ede9e7e4d66faa15f3bd3c3196ed3d
 +		}
 +		return GetModuleHandle_Native(lpModuleName);
 +	}
- 
--	[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
--	internal static extern IntPtr GetModuleHandle(string lpModuleName);
++
 +	[DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "LoadLibrary")]
 +	private static extern IntPtr LoadLibrary_Native(string lpFileName);
- 
--	[DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
--	internal static extern IntPtr LoadLibrary(string lpFileName);
++
 +	internal static IntPtr LoadLibrary(string lpFileName)
 +	{
 +		if (!Win32)
