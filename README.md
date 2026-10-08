@@ -33,7 +33,8 @@ map images next to the program.
   MT-32 driver.
 - The surface map images are found next to the program (also The Bard's Tale's Skara Brae map, which the built-in
   map names with a folder of the map author's machine); with a `WhereAreWe.settings` file next to it the settings
-  stay there too (portable).
+  stay there too (portable), and started that way with a game on the command line (`-g`, as eXoDOS does) it skips
+  the first-run setup wizard.
 - Window placement on Windows: the DOSBox window is told apart from Windows' text input indicator (which DOSBox
   Staging's process also owns); window frames are measured right at any display scaling (the original was 7% off
   at 150%, so windows snapped and were arranged beside other windows); while "Keep DOSBox window location" is set
@@ -65,7 +66,9 @@ and `ilspycmd` 11.0.0.9375
 - `tools/`: build and release scripts, and the test rig: `wawprobe` (what the port reads, on the command line),
   `wawshot`/`wawshot-msf` (open the program's windows and capture them, Windows and headless), `fakeapi.py` (serve a
   RAM dump as the DOSBox Staging API), `exo_bootcheck.py`/`exo_optioncheck.py` (play eXoDOS's games under each of
-  their launch options on a private desktop), `layoutall.sh` (compare both builds' windows), `linux_check.sh` (the
+  their launch options on a private desktop), `layout_check.py` (the same games with every window of the program open:
+  laid out around DOSBox, none over it, also after DOSBox is resized), `layoutall.sh` (compare both builds' windows),
+  `linux_check.sh` (the
   Linux build in WSL), `api074.py` (the API on top of a DOSBox 0.74 process, for comparing with the original)
 - `tests/test_patch_exo.py`: the eXoDOS patch on a scratch copy of an eXo installation's launchers
 

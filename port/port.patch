@@ -2772,7 +2772,7 @@ index 718206fd99d7205bc9566a5621d9560a95ae38ed..0698c7ee93f6862c294744526cc43790
  		this.chName.Text = "Skill Name";
  		this.chName.Width = 150;
 diff --git a/WhereAreWe/MainForm.cs b/WhereAreWe/MainForm.cs
-index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..4798bf1de5d77529b54e558a4a3c48350a34e2b4 100644
+index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..2a7804c75ecf4596e3e1ae8185ad01c2ae4ab6ec 100644
 --- a/WhereAreWe/MainForm.cs
 +++ b/WhereAreWe/MainForm.cs
 @@ -2342,7 +2342,8 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
@@ -2856,7 +2856,20 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..4798bf1de5d77529b54e558a4a3c4835
  		Global.Windows = Settings.Default.Windows;
  		if (Global.Windows == null)
  		{
-@@ -8723,7 +8735,12 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -6518,6 +6530,12 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+ 		ShowToolbar(Settings.Default.ShowToolbar);
+ 		CheckShortcuts();
+ 		bool flag = false;
++		// port: started with a game on the command line from a portable install (the eXoDOS launcher's way), the
++		// setup wizard's job (pick a game, DOSBox shortcuts that launch it) is done already: no first-run wizard
++		if (!Settings.Default.WizardRun && m_clOptions.Game != GameNames.None && PortableSettingsProvider.FilePath != null)
++		{
++			Settings.Default.WizardRun = true;
++		}
+ 		if (!Settings.Default.WizardRun)
+ 		{
+ 			flag = RunWizard();
+@@ -8723,7 +8741,12 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  		int num = 1;
  		foreach (string path in Settings.Default.MRUList.Paths)
  		{
@@ -2869,7 +2882,7 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..4798bf1de5d77529b54e558a4a3c4835
  			toolStripItem.Tag = path;
  			toolStripItem.Click += tsi_Click;
  		}
-@@ -8990,6 +9007,12 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -8990,6 +9013,12 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  			string text = (KeyboardHook.IsActive() ? " (hook)" : "");
  			if (Settings.Default.ShowCPU)
  			{
@@ -2882,7 +2895,7 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..4798bf1de5d77529b54e558a4a3c4835
  				if (Global.CpuCounter == null)
  				{
  					Global.CpuCounter = new PerformanceCounter("Process", "% Processor Time", Process.GetCurrentProcess().ProcessName);
-@@ -9450,7 +9473,7 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -9450,7 +9479,7 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  		int k;
  		for (k = 0; k < menuStrip1.Items.Count; k++)
  		{
@@ -2891,7 +2904,7 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..4798bf1de5d77529b54e558a4a3c4835
  			{
  				continue;
  			}
-@@ -10206,12 +10229,80 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -10206,12 +10235,80 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  		{
  			form.Location = Global.FixWindowLocation(windowInfo.NormalSize.Location);
  		}
@@ -2972,7 +2985,7 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..4798bf1de5d77529b54e558a4a3c4835
  	private void CreateWindowNoShow<T>(ref T form, WindowType type, object param = null) where T : HackerBasedForm, new()
  	{
  		CreateWindow(ref form, type, bIgnoreAutoshow: true, param);
-@@ -10305,7 +10396,11 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -10305,7 +10402,11 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  	{
  		StringsViewForm stringsViewForm = new StringsViewForm();
  		StringBuilder stringBuilder = new StringBuilder();
@@ -2984,7 +2997,7 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..4798bf1de5d77529b54e558a4a3c4835
  		stringBuilder.AppendFormat("Config file (ConfigurationUserLevel.None): {0}\r\n", ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.None).FilePath);
  		stringBuilder.AppendFormat("Config file (ConfigurationUserLevel.PerUserRoaming): {0}\r\n", ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.PerUserRoaming).FilePath);
  		stringBuilder.AppendFormat("Config file (ConfigurationUserLevel.PerUserRoamingAndLocal): {0}\r\n", ConfigurationManager.OpenExeConfiguration(ConfigurationUserLevel.PerUserRoamingAndLocal).FilePath);
-@@ -10969,7 +11064,7 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -10969,7 +11070,7 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  		}
  	}
  
@@ -2993,7 +3006,7 @@ index 23aa9c3b54c95afa569e07470b8c7d8332d6cb9d..4798bf1de5d77529b54e558a4a3c4835
  	{
  		if (Hacker == null || !Hacker.IsValid)
  		{
-@@ -10977,67 +11072,189 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
+@@ -10977,67 +11078,189 @@ public class MainForm : FullyScalableForm, IKeyboardHookCallback, IMain
  			{
  				MessageBox.Show("The auto-arrange function requires that a known DOSBox game is running (check the \"Play\" tab of the Options window)", "Memory scanner not running", MessageBoxButtons.OK, MessageBoxIcon.Exclamation);
  			}

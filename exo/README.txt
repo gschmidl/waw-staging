@@ -36,7 +36,9 @@ Changes from the original:
   Tale's Skara Brae map, which the built-in map names with a folder of the
   map author's machine.
 - With a file named WhereAreWe.settings next to the program, the settings and
-  the autosave file stay in this folder (an empty file is enough).
+  the autosave file stay in this folder (an empty file is enough). Started
+  that way with a game on the command line (-g, as eXoDOS does), there is no
+  first-run setup wizard (Help > Run setup wizard still has it).
 - Windows: while "Keep DOSBox window location" is set (Options, DOSBox tab;
   on by default), every run puts DOSBox at that location and the map,
   Game Info, Encounters and Party windows around it, in the room DOSBox
