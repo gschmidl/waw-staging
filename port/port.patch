@@ -2776,7 +2776,7 @@ index 06ce0da3a43e8ca70c71dcaebbe8fa2f5f4f55d7..fd188e5cd5c1a029737c900be6a3b228
  		this.chName.Text = "Name";
  		this.chName.Width = 170;
 diff --git a/WhereAreWe/MM3MemoryHacker.cs b/WhereAreWe/MM3MemoryHacker.cs
-index 0c93a96bffa3a051a5e73741a36547e3ef1585f9..d69acbffb633eff8fe36d69c83296c28863affcc 100644
+index 0c93a96bffa3a051a5e73741a36547e3ef1585f9..8a720e6c7846ce520b14ec6dce460c76675cdbd8 100644
 --- a/WhereAreWe/MM3MemoryHacker.cs
 +++ b/WhereAreWe/MM3MemoryHacker.cs
 @@ -138,8 +138,27 @@ public class MM3MemoryHacker : MM345MemoryHacker
@@ -2816,7 +2816,37 @@ index 0c93a96bffa3a051a5e73741a36547e3ef1585f9..d69acbffb633eff8fe36d69c83296c28
  		ushort num2 = ReadUInt16(-48091L);
  		ushort create = ReadUInt16(41321L);
  		mM3GameState.IsCaster = ReadIsCaster();
-@@ -2892,9 +2911,28 @@ public class MM3MemoryHacker : MM345MemoryHacker
+@@ -457,6 +476,29 @@ public class MM3MemoryHacker : MM345MemoryHacker
+ 			}
+ 			break;
+ 		}
++		if (StateStackAdjust > 0 && !mM3GameState.InCombat && (mM3GameState.Main == MainState.Unknown || mM3GameState.Main == MainState.CharacterScreen))
++		{
++			// port: under eXoDOS's MM3.COM loader the saved stack word takes many values the table doesn't have,
++			// outside the towns above all (2026-10-08, three fights played by the user, the words logged at every
++			// change, and a RAM snapshot of an earlier fight): in every fight it was 65240..65350 with the second
++			// word 7805, 21056, 15958, 33311 (looking at a character), 59196 or 60648, the gold screen included;
++			// never outside a fight (spell menu 65362, character screen 65364, walking 65374/65200, after a menu
++			// 65380/12598, map changes below 65200); one 65342 with 21056 right after a fight was most likely
++			// monsters joining (the user). Words the table knows keep its meaning.
++			if (num >= 65240 && num <= 65350 && (num2 == 7805 || num2 == 21056 || num2 == 15958 || num2 == 33311 || num2 == 59196 || num2 == 60648))
++			{
++				mM3GameState.InCombat = true;
++				if (mM3GameState.Main == MainState.Unknown)
++				{
++					mM3GameState.Main = MainState.Combat;
++				}
++			}
++			else if (mM3GameState.Main == MainState.Unknown && (num2 == 12598 || num2 == 60648 || num2 == 59196))
++			{
++				// the idle words outside a fight: walking, after a menu, after a fight
++				mM3GameState.Main = MainState.Adventuring;
++			}
++		}
+ 		byte b = ReadByte(41867L);
+ 		if (b == byte.MaxValue || b == 50)
+ 		{
+@@ -2892,9 +2934,28 @@ public class MM3MemoryHacker : MM345MemoryHacker
  				num += 32;
  			}
  		}

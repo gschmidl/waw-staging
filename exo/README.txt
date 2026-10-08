@@ -33,9 +33,8 @@ Changes from the original:
   Assistant shows names and experience in full.
 - World of Xeen (eXoDOS's CD version): fights are recognised (its combat flag
   sits one byte from where the original looks).
-- Known limit: Might and Magic III outside the towns doesn't tell a fight from
-  walking (the state reads "unknown"); the Encounters window, the map and the
-  party work there as everywhere.
+- Might and Magic III (eXoDOS's, started through its MM3.COM loader): fights
+  are recognised outside the towns too.
 - Quitting after DOSBox has closed is immediate (no waiting for DOSBox).
 - Might and Magic III: the state is read right under eXoDOS's MM3.COM loader;
   the monster list is found with the MT-32 driver loaded too.
