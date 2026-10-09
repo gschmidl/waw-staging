@@ -1838,10 +1838,10 @@ index ad6e0a102ea57876b8c38c404aa557964820551d..714e902b37c3db7af80fa1e77939586f
  		switch (bTGameState.Main)
  		{
 diff --git a/WhereAreWe/BT2MemoryHacker.cs b/WhereAreWe/BT2MemoryHacker.cs
-index c1d68b10f713ee39af1971e0ecf96946fead2c7b..38e215d2ac71a6d7e9bd4f0c1f3394fe512ca684 100644
+index c1d68b10f713ee39af1971e0ecf96946fead2c7b..624fdfcc6064a819218035dcdf81d05960e972bc 100644
 --- a/WhereAreWe/BT2MemoryHacker.cs
 +++ b/WhereAreWe/BT2MemoryHacker.cs
-@@ -83,6 +83,17 @@ public class BT2MemoryHacker : BTMemoryHacker
+@@ -83,6 +83,23 @@ public class BT2MemoryHacker : BTMemoryHacker
  		return stringBuilder.ToString();
  	}
  
@@ -1850,26 +1850,40 @@ index c1d68b10f713ee39af1971e0ecf96946fead2c7b..38e215d2ac71a6d7e9bd4f0c1f3394fe
 +	// every stack change: 10186 in 31 and 7760 in 40 of the 41 round readings, none in town before or after; the
 +	// table's 105,8 never occurred). So the encounter window wasn't updated during rounds. Looked for in the live
 +	// part of the stack when the table finds nothing.
-+	private static readonly KeyValuePair<int, MainState>[] LiveCombatStates = new KeyValuePair<int, MainState>[2]
++	private static readonly KeyValuePair<int, MainState>[] LiveCombatStates = new KeyValuePair<int, MainState>[5]
 +	{
++		// the table's chest (215,58) first: it is called from the fight's end below
++		new KeyValuePair<int, MainState>(15063, MainState.Treasure),
 +		new KeyValuePair<int, MainState>(10186, MainState.Combat),
-+		new KeyValuePair<int, MainState>(7760, MainState.Combat)
++		new KeyValuePair<int, MainState>(7760, MainState.Combat),
++		// the fight's end (victory, then the experience and gold messages, 15037 and 15808 under 14804; they go on by
++		// themselves after a few seconds), 2026-10-09: 10003 in 48 and 14804 in 48 of 51 readings, never walking
++		new KeyValuePair<int, MainState>(10003, MainState.Combat),
++		new KeyValuePair<int, MainState>(14804, MainState.Combat)
 +	};
 +
  	protected override BTGameState GetMainState(byte[] stack, byte[] states = null)
  	{
  		BTGameState bTGameState = new BTGameState();
-@@ -123,6 +134,10 @@ public class BT2MemoryHacker : BTMemoryHacker
+@@ -123,9 +140,16 @@ public class BT2MemoryHacker : BTMemoryHacker
  				}
  			}
  		}
+-		if (bTGameState.Main == MainState.Treasure)
 +		if (bTGameState.Main == MainState.Unknown)
 +		{
-+			bTGameState.Main = LiveStackState(stack, LiveStackDepth(), LiveCombatStates, out int _);
++			bTGameState.Main = LiveStackState(stack, LiveStackDepth(), LiveCombatStates, out num);
 +		}
- 		if (bTGameState.Main == MainState.Treasure)
++		if (bTGameState.Main == MainState.Treasure && num >= 24)
  		{
- 			switch (stack[num - 24])
+-			switch (stack[num - 24])
++			// port: in eXoDOS's BT2 the "who will ...?" question's return address (1412:0083, 00AD, 00D7, 0102, the
++			// low bytes below) lies 12 bytes under the chest's, not 24 (a forced chest, examined by the user, 2026-10-09)
++			int iPrompt = BitConverter.ToUInt16(stack, num - 12);
++			switch ((iPrompt == 131 || iPrompt == 173 || iPrompt == 215 || iPrompt == 258) ? (iPrompt & 0xFF) : stack[num - 24])
+ 			{
+ 			case 131:
+ 				bTGameState.Main = MainState.TreasureWhoWillInspect;
 diff --git a/WhereAreWe/BT3.cs b/WhereAreWe/BT3.cs
 index 2a1adf10608a858c16de4b8e84f7b17fe4c993a6..7326699723747891604a8252e06d18c3e69294b7 100644
 --- a/WhereAreWe/BT3.cs

@@ -29,7 +29,8 @@ Changes from the original:
 - The Bard's Tale III: also the THIEFP.EXE build (the one eXoDOS runs).
 - The Bard's Tale I and II (eXoDOS's versions): fights are recognised, so the
   Encounters window follows them (their stack frames lie elsewhere than in
-  the versions the original was made with). The Bard's Tale Training
+  the versions the original was made with); in The Bard's Tale II also the
+  treasure chest and its "who will ...?" questions. The Bard's Tale Training
   Assistant shows names and experience in full.
 - World of Xeen (eXoDOS's CD version): fights are recognised (its combat flag
   sits one byte from where the original looks).

@@ -31,7 +31,8 @@ map images next to the program.
   monster table are searched for where the original used fixed addresses.
 - eXoDOS's versions: The Bard's Tale III's THIEFP.EXE (a second memory map), MM3's MM3.COM loader, MM3 with the
   MT-32 driver; The Bard's Tale I and II, whose stack frames lie at other depths than the state tables expect, so
-  their fights are also found by the tables' return addresses anywhere in the live stack (SS:SP from the API);
+  their fights are also found by the tables' return addresses anywhere in the live stack (SS:SP from the API), in
+  BT2 also the fight's end and the treasure chest, whose "who will ...?" questions lie 12 bytes nearer;
   World of Xeen's CD version, whose combat flag sits one byte before the table's; MM3 under eXoDOS's MM3.COM loader,
   whose saved stack words outside the towns are missing from the table (a word range and the second words seen in
   every logged fight now count as combat where the table has no answer). Every game was checked in a fight played
